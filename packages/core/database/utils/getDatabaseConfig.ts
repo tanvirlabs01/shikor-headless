@@ -1,13 +1,19 @@
-import { MockConfig, PostgresConfig } from "../types";
+import { MockConfig, PostgresConfig, MongoConfig } from "../types";
 
-type Engine = "mock" | "postgres";
+type Engine = "mock" | "postgres" | "mongo";
 
-// ✅ Properly typed function overload
-export function getDatabaseConfig<T extends Engine>(
-  engine: T
-): T extends "mock" ? MockConfig : PostgresConfig;
+// ✅ Add union signature overload
+export function getDatabaseConfig(engine: "mock"): MockConfig;
+export function getDatabaseConfig(engine: "postgres"): PostgresConfig;
+export function getDatabaseConfig(engine: "mongo"): MongoConfig;
+export function getDatabaseConfig(
+  engine: Engine
+): MockConfig | PostgresConfig | MongoConfig;
 
-export function getDatabaseConfig(engine: Engine): any {
+// ✅ Implementation
+export function getDatabaseConfig(
+  engine: Engine
+): MockConfig | PostgresConfig | MongoConfig {
   switch (engine) {
     case "postgres":
       return {
@@ -19,9 +25,16 @@ export function getDatabaseConfig(engine: Engine): any {
         ssl: process.env.POSTGRES_SSL === "true",
         poolSize: Number(process.env.POSTGRES_POOL_SIZE || 10),
         idleTimeout: Number(process.env.POSTGRES_IDLE_TIMEOUT || 30000),
-      } as PostgresConfig;
+      };
+
+    case "mongo":
+      return {
+        connectionString: process.env.MONGO_URL!,
+        dbName: process.env.MONGO_DB_NAME!,
+      };
+
     case "mock":
     default:
-      return {} as MockConfig;
+      return {};
   }
 }

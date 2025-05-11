@@ -3,10 +3,16 @@ import { EventEmitter } from "events";
 import type { Logger } from "pino";
 import { IDatabaseStrategy } from "../../IDatabaseStrategy";
 
+type QueryOptions = {
+  timeout?: number;
+  transaction?: PoolClient;
+};
+
 export class PostgresStrategy implements IDatabaseStrategy {
   private pool: Pool;
   private connectionPromise?: Promise<void>;
   private emitter = new EventEmitter();
+  private retryCount = 0;
   public status: "connecting" | "ready" | "error" = "connecting";
 
   constructor(
@@ -19,6 +25,8 @@ export class PostgresStrategy implements IDatabaseStrategy {
       ssl?: boolean;
       poolSize?: number;
       idleTimeout?: number;
+      connectionTimeout?: number;
+      maxRetries?: number;
     },
     private logger?: Logger
   ) {
@@ -31,51 +39,80 @@ export class PostgresStrategy implements IDatabaseStrategy {
       ssl: this.config.ssl,
       max: this.config.poolSize || 10,
       idleTimeoutMillis: this.config.idleTimeout || 30000,
+      connectionTimeoutMillis: this.config.connectionTimeout || 5000,
     });
 
     this.pool.on("error", (err) => {
       this.logger?.error({ err, module: "database" }, "PostgreSQL pool error");
       this.status = "error";
+      this.emitter.emit("disconnect");
     });
   }
 
+  // Public interface methods
   public get ready(): Promise<void> {
     if (!this.connectionPromise) {
-      this.connectionPromise = this.connect();
+      this.connectionPromise = this.connectWithRetry();
     }
     return this.connectionPromise;
   }
 
   public async connect(): Promise<void> {
-    if (this.status === "ready") return;
+    return this.connectWithRetry();
+  }
 
-    this.status = "connecting";
+  private async connectWithRetry(): Promise<void> {
     try {
+      this.status = "connecting";
       const client = await this.pool.connect();
+
+      // Validate connection
       await client.query("SELECT 1");
+      await this.validateDatabaseVersion(client);
+
       client.release();
       this.status = "ready";
+      this.retryCount = 0;
       this.logger?.info(
         { module: "database" },
         "PostgreSQL connected successfully"
       );
       this.emitter.emit("connect");
     } catch (error) {
+      if (this.retryCount < (this.config.maxRetries ?? 3)) {
+        this.retryCount++;
+        const delay = Math.pow(2, this.retryCount) * 100;
+        this.logger?.warn(
+          { err: error, attempt: this.retryCount, delay },
+          "PostgreSQL connection failed, retrying..."
+        );
+        await new Promise((res) => setTimeout(res, delay));
+        return this.connectWithRetry();
+      }
+
       this.status = "error";
       this.logger?.error(
         { err: error, module: "database" },
-        "PostgreSQL connection failed"
+        "PostgreSQL connection failed after retries"
       );
       throw error;
     }
   }
 
+  private async validateDatabaseVersion(client: PoolClient): Promise<void> {
+    const { rows } = await client.query("SHOW server_version");
+    this.logger?.debug(
+      { version: rows[0].server_version, module: "database" },
+      "Database version check"
+    );
+  }
+
   public async disconnect(): Promise<void> {
     try {
       await this.pool.end();
-      this.emitter.emit("disconnect");
       this.status = "error";
       this.connectionPromise = undefined;
+      this.emitter.emit("disconnect");
       this.logger?.info({ module: "database" }, "PostgreSQL disconnected");
     } catch (error) {
       this.logger?.error(
@@ -86,7 +123,8 @@ export class PostgresStrategy implements IDatabaseStrategy {
     }
   }
 
-  public async create(table: string, data: any): Promise<any> {
+  // CRUD Operations with Type Safety
+  public async create<T = any>(table: string, data: Partial<T>): Promise<T> {
     const sql = `INSERT INTO ${this.sanitizeIdentifier(table)} (${Object.keys(
       data
     )
@@ -95,46 +133,76 @@ export class PostgresStrategy implements IDatabaseStrategy {
       .map((_, i) => `$${i + 1}`)
       .join(", ")}) RETURNING *`;
 
-    const result = await this.queryWithLog(sql, Object.values(data));
+    const result = await this.queryWithLog<T>(sql, Object.values(data));
     return result.rows[0];
   }
 
-  public async read(
+  public async createBulk<T = any>(
     table: string,
-    queryObj: any = {},
+    items: Partial<T>[]
+  ): Promise<T[]> {
+    if (items.length === 0) return [];
+
+    const keys = Object.keys(items[0]);
+    const values = items.flatMap((item) => Object.values(item));
+    const placeholders = items
+      .map(
+        (_, i) =>
+          `(${keys.map((_, j) => `$${i * keys.length + j + 1}`).join(", ")})`
+      )
+      .join(", ");
+
+    const sql = `INSERT INTO ${this.sanitizeIdentifier(table)} (${keys.map((k) => this.sanitizeIdentifier(k)).join(", ")}) 
+                VALUES ${placeholders} RETURNING *`;
+    const result = await this.queryWithLog<T>(sql, values);
+    return result.rows;
+  }
+
+  public async read<T = any>(
+    table: string,
+    queryObj: Record<string, any> = {},
     options?: {
       limit?: number;
       offset?: number;
       orderBy?: string;
+      orderDirection?: "ASC" | "DESC";
       fields?: string[];
     }
-  ): Promise<any[]> {
+  ): Promise<T[]> {
     const keys = Object.keys(queryObj);
     const values = Object.values(queryObj);
-    const sanitizedTable = this.sanitizeIdentifier(table);
     const fields =
       options?.fields?.map((f) => this.sanitizeIdentifier(f)).join(", ") || "*";
 
-    let sql = `SELECT ${fields} FROM ${sanitizedTable}`;
+    let sql = `SELECT ${fields} FROM ${this.sanitizeIdentifier(table)}`;
+
     if (keys.length) {
       sql += ` WHERE ${keys.map((k, i) => `${this.sanitizeIdentifier(k)} = $${i + 1}`).join(" AND ")}`;
     }
-    if (options?.orderBy)
-      sql += ` ORDER BY ${this.sanitizeIdentifier(options.orderBy)}`;
+
+    if (options?.orderBy) {
+      sql += ` ORDER BY ${this.sanitizeIdentifier(options.orderBy)} ${options.orderDirection || "ASC"}`;
+    }
+
     if (options?.limit) {
       values.push(options.limit);
       sql += ` LIMIT $${values.length}`;
     }
+
     if (options?.offset) {
       values.push(options.offset);
       sql += ` OFFSET $${values.length}`;
     }
 
-    const result = await this.queryWithLog(sql, values);
+    const result = await this.queryWithLog<T>(sql, values);
     return result.rows;
   }
 
-  public async update(table: string, queryObj: any, data: any): Promise<any> {
+  public async update<T = any>(
+    table: string,
+    queryObj: Record<string, any>,
+    data: Partial<T>
+  ): Promise<T> {
     const dataKeys = Object.keys(data);
     const queryKeys = Object.keys(queryObj);
     const values = [...Object.values(data), ...Object.values(queryObj)];
@@ -149,11 +217,14 @@ export class PostgresStrategy implements IDatabaseStrategy {
       .join(" AND ");
 
     const sql = `UPDATE ${this.sanitizeIdentifier(table)} SET ${setClause} WHERE ${whereClause} RETURNING *`;
-    const result = await this.queryWithLog(sql, values);
+    const result = await this.queryWithLog<T>(sql, values);
     return result.rows[0];
   }
 
-  public async delete(table: string, queryObj: any): Promise<any> {
+  public async delete<T = any>(
+    table: string,
+    queryObj: Record<string, any>
+  ): Promise<T> {
     const keys = Object.keys(queryObj);
     const values = Object.values(queryObj);
 
@@ -162,10 +233,11 @@ export class PostgresStrategy implements IDatabaseStrategy {
       .join(" AND ");
 
     const sql = `DELETE FROM ${this.sanitizeIdentifier(table)} WHERE ${whereClause} RETURNING *`;
-    const result = await this.queryWithLog(sql, values);
+    const result = await this.queryWithLog<T>(sql, values);
     return result.rows[0];
   }
 
+  // Transaction Support
   public async transaction<T>(
     callback: (client: PoolClient) => Promise<T>
   ): Promise<T> {
@@ -188,63 +260,104 @@ export class PostgresStrategy implements IDatabaseStrategy {
     }
   }
 
-  public async healthCheck(): Promise<{ ok: boolean; latency: number }> {
+  // Health Monitoring
+  public async healthCheck(): Promise<{
+    ok: boolean;
+    latency: number;
+    details?: {
+      version?: string;
+      activeConnections?: number;
+      poolStatus?: {
+        total: number;
+        idle: number;
+        waiting: number;
+      };
+    };
+  }> {
     const start = Date.now();
     try {
-      await this.query("SELECT 1", [], 1000);
-      const latency = Date.now() - start;
-      this.logger?.info({ latency, module: "database" }, "Health check passed");
-      return { ok: true, latency };
+      const client = await this.pool.connect();
+      try {
+        const [pingResult, versionResult, activityResult] = await Promise.all([
+          client.query("SELECT 1"),
+          client.query("SHOW server_version"),
+          client.query(
+            "SELECT COUNT(*) AS active FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
+          ),
+        ]);
+
+        return {
+          ok: true,
+          latency: Date.now() - start,
+          details: {
+            version: versionResult.rows[0].server_version,
+            activeConnections: activityResult.rows[0].active,
+            poolStatus: this.getPoolMetrics(),
+          },
+        };
+      } finally {
+        client.release();
+      }
     } catch (error) {
-      const latency = Date.now() - start;
-      this.logger?.error(
-        { err: error, latency, module: "database" },
-        "Health check failed"
-      );
-      return { ok: false, latency };
+      return {
+        ok: false,
+        latency: Date.now() - start,
+      };
     }
   }
 
+  public getPoolMetrics() {
+    return {
+      total: this.pool.totalCount,
+      idle: this.pool.idleCount,
+      waiting: this.pool.waitingCount,
+    };
+  }
+
+  // Event Handling
   public on(event: "connect" | "disconnect", listener: () => void): void {
     this.emitter.on(event, listener);
   }
 
-  public async executeRaw(
+  // Raw SQL Execution
+  public async executeRaw<T = any>(
     sql: string,
     params?: any[],
-    timeout = 5000
-  ): Promise<QueryResult> {
-    return this.queryWithLog(sql, params, timeout);
+    options?: QueryOptions
+  ): Promise<QueryResult<T>> {
+    return this.queryWithLog<T>(sql, params, options);
   }
 
-  private async query(
+  // Internal Methods
+  private async queryWithLog<T = any>(
     sql: string,
     params?: any[],
-    timeout = 5000
-  ): Promise<QueryResult> {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SET LOCAL statement_timeout = ${timeout}`);
-      return await client.query(sql, params);
-    } finally {
-      client.release();
-    }
-  }
-
-  private async queryWithLog(
-    sql: string,
-    params?: any[],
-    timeout = 5000
-  ): Promise<QueryResult> {
+    options?: QueryOptions
+  ): Promise<QueryResult<T>> {
     const start = Date.now();
+    const { timeout = 5000, transaction } = options || {};
+
     try {
-      const result = await this.query(sql, params, timeout);
-      const duration = Date.now() - start;
-      this.logger?.info(
-        { sql, params, duration, module: "database" },
-        "Query executed"
-      );
-      return result;
+      const client = transaction || (await this.pool.connect());
+      try {
+        await client.query(`SET LOCAL statement_timeout = ${timeout}`);
+        const result = await client.query(sql, params);
+        const duration = Date.now() - start;
+
+        this.logger?.debug(
+          {
+            sql,
+            params,
+            duration,
+            module: "database",
+          },
+          "Query executed"
+        );
+
+        return result;
+      } finally {
+        if (!transaction) client.release();
+      }
     } catch (error) {
       this.logger?.error(
         { sql, params, err: error, module: "database" },
@@ -256,5 +369,11 @@ export class PostgresStrategy implements IDatabaseStrategy {
 
   private sanitizeIdentifier(identifier: string): string {
     return `"${identifier.replace(/"/g, '""')}"`;
+  }
+
+  // Cleanup
+  public async destroy() {
+    this.emitter.removeAllListeners();
+    await this.disconnect();
   }
 }
