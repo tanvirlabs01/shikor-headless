@@ -2,9 +2,12 @@ import express, { Request, Response, NextFunction } from "express";
 import cluster from "cluster";
 import os from "os";
 import helmet from "helmet";
-import { logger } from "@shikor/core/telemetry/logger";
-import { httpLogger } from "@shikor/core/utils/httpLogger";
-import { env } from "@shikor/core/config";
+import { logger, dbLogger } from "@shikor/core/src/telemetry/logger";
+import { httpLogger } from "@shikor/core/src/utils/httpLogger";
+import { env } from "@shikor/core/src/config";
+import { DatabaseStrategyFactory } from "@shikor/core/database";
+import { getDatabaseConfig } from "@shikor/core/database/utils/getDatabaseConfig";
+import { PostgresConfig, MockConfig } from "@shikor/core/database/types";
 
 class AppError extends Error {
   constructor(
@@ -31,9 +34,11 @@ app.use(httpLogger);
 // Routes
 // ======================
 app.get("/health", async (req: Request, res: Response) => {
+  const db = req.app.locals.db;
+
   const checks = {
-    database: true, // Replace with actual check
-    redis: true, // Replace with actual check
+    database: db ? (await db.healthCheck()).ok : false,
+    redis: true,
     diskSpace: checkDiskSpace(),
   };
 
@@ -63,6 +68,18 @@ app.get("/error", () => {
     debugInfo: "Additional context",
     timestamp: Date.now(),
   });
+});
+
+app.get("/users", async (req: Request, res: Response) => {
+  const db = req.app.locals.db;
+  const users = await db.read("users", {});
+  res.json(users);
+});
+
+app.post("/users", async (req: Request, res: Response) => {
+  const db = req.app.locals.db;
+  const newUser = await db.create("users", req.body);
+  res.status(201).json(newUser);
 });
 
 // ======================
@@ -110,17 +127,53 @@ if (cluster.isPrimary && env.isProd) {
     cluster.fork();
   });
 } else {
-  const server = app.listen(PORT, () => {
-    logger.info(`Worker ${process.pid} started on port ${PORT}`);
-  });
+  (async () => {
+    try {
+      DatabaseStrategyFactory.setLogger(dbLogger);
 
-  process.on("SIGTERM", () => {
-    logger.info("SIGTERM received. Graceful shutdown started");
-    server.close(() => {
-      logger.info("Server closed");
-      process.exit(0);
-    });
-  });
+      if (process.env.ENABLE_BYODB === "true") {
+        const registerCustomEngines = (
+          await import("@shikor/dev/register-custom-dbs")
+        ).default;
+        registerCustomEngines();
+      }
+
+      const engine = (process.env.DB_ENGINE || "mock") as "mock" | "postgres";
+      const config = getDatabaseConfig(engine);
+
+      let db;
+
+      if (engine === "mock") {
+        db = await DatabaseStrategyFactory.create("mock", config as MockConfig);
+      } else if (engine === "postgres") {
+        db = await DatabaseStrategyFactory.create(
+          "postgres",
+          config as PostgresConfig
+        );
+      }
+
+      app.locals.db = db;
+
+      const server = app.listen(PORT, () => {
+        logger.info(`Worker ${process.pid} started on port ${PORT}`);
+      });
+
+      process.on("SIGTERM", async () => {
+        logger.info("SIGTERM received. Graceful shutdown started");
+
+        await db.disconnect();
+        dbLogger.info("Database disconnected");
+
+        server.close(() => {
+          logger.info("Server closed");
+          process.exit(0);
+        });
+      });
+    } catch (err) {
+      logger.error(err, "Failed to start server");
+      process.exit(1);
+    }
+  })();
 }
 
 // ======================
@@ -131,7 +184,7 @@ function checkDiskSpace(): boolean {
     const disk = os.platform() === "win32" ? "c:" : "/";
     const stats = require("node:fs").statfsSync(disk);
     const freeGB = (stats.bfree * stats.bsize) / 1024 ** 3;
-    return freeGB > 5; // At least 5GB free
+    return freeGB > 5;
   } catch (err) {
     logger.error(err, "Disk check failed");
     return false;

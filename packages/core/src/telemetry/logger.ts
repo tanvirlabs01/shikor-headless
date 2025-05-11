@@ -9,6 +9,7 @@ const transports = {
       translateTime: "yyyy-mm-dd HH:MM:ss.l",
       ignore: "pid,hostname",
       singleLine: true,
+      messageFormat: "[{module}] {msg}", // ✅ show module in console
     },
   },
   production: {
@@ -85,12 +86,11 @@ export function createLogger(context: object = {}): Logger {
 }
 
 export const logger = createLogger();
-export const baseLogger = logger; // ✅ expose baseLogger
+export const baseLogger = logger;
 
 export const httpLogger = createLogger({ module: "http" });
 export const dbLogger = createLogger({ module: "database" });
 
-// ✅ request-scoped logger using .child()
 export const createRequestLogger = (
   requestId: string,
   loggerInstance: Logger = baseLogger

@@ -1,16 +1,24 @@
 {
   "compilerOptions": {
     "target": "ES2021",
-    "module": "CommonJS",
-    "lib": ["ESNext"],
-    "moduleResolution": "Node",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["ES2021"],
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noImplicitAny": false,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
     "baseUrl": ".",
+    "types": ["node", "vitest"],
     "paths": {
-      "@shikor/core/*": ["packages/core/src/*"]
+      "@shikor/core/*": ["packages/core/*"],
+      "@shikor/dev/*": ["packages/dev/*"]
     }
   }
 }

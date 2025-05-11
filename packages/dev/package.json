@@ -1,0 +1,12 @@
+{
+  "name": "@shikor/dev",
+  "version": "1.0.0",
+  "description": "",
+  "main": "register-custom-dbs.ts",
+  "scripts": {
+    "test:factory": "ts-node test-factory.ts",
+    "migrate": "ts-node migrate.ts"
+  },
+  "author": "",
+  "license": "ISC"
+}
