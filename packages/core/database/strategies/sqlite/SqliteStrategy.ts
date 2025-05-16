@@ -1,21 +1,35 @@
 import Database from "better-sqlite3";
 import type { Logger } from "pino";
-import type { IDatabaseStrategy } from "../../IDatabaseStrategy";
 import fs from "node:fs";
 import path from "node:path";
+import { EventEmitter } from "events";
+import { z, ZodObject, ZodRawShape } from "zod";
 
-export class SqliteStrategy implements IDatabaseStrategy {
+import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
+import type { ConnectionStatus } from "../../IDatabaseStrategy";
+import type { QueryOptions } from "../../types/QueryOptions";
+
+export class SqliteStrategy extends BaseDatabaseStrategy {
   private db!: Database.Database;
-  public status: "connecting" | "ready" | "error" = "connecting";
+  private emitter = new EventEmitter();
+  private schemas: Map<string, ZodObject<ZodRawShape>> = new Map();
+
+  public status: ConnectionStatus = "connecting";
   public ready: Promise<void>;
 
   constructor(
     private config: { filepath: string },
     private logger?: Logger
   ) {
+    super();
     this.ready = this.connect();
     this.logger?.info({ module: "sqlite-db" }, "SqliteStrategy initialized");
   }
+
+  public registerSchema<T>(table: string, schema: ZodObject<ZodRawShape>) {
+    this.schemas.set(table, schema);
+  }
+
   public async connect(): Promise<void> {
     try {
       const dir = path.dirname(this.config.filepath);
@@ -25,12 +39,14 @@ export class SqliteStrategy implements IDatabaseStrategy {
 
       this.db = new Database(this.config.filepath);
       this.status = "ready";
+      this.emitter.emit("connect");
       this.logger?.info(
         { module: "sqlite-db" },
         `SQLite connected at ${this.config.filepath}`
       );
     } catch (error) {
       this.status = "error";
+      this.emitter.emit("disconnect");
       this.logger?.error(
         { err: error, module: "sqlite-db" },
         "SQLite connection failed"
@@ -43,6 +59,7 @@ export class SqliteStrategy implements IDatabaseStrategy {
     try {
       this.db.close();
       this.status = "error";
+      this.emitter.emit("disconnect");
       this.logger?.info("SQLite connection closed");
     } catch (error) {
       this.logger?.error({ err: error }, "SQLite disconnect failed");
@@ -50,7 +67,12 @@ export class SqliteStrategy implements IDatabaseStrategy {
     }
   }
 
-  public async create(table: string, data: any): Promise<any> {
+  public async create<T extends Record<string, any>>(
+    table: string,
+    data: T
+  ): Promise<T> {
+    this.validateSchema(table, data);
+
     const keys = Object.keys(data);
     const placeholders = keys.map(() => "?").join(", ");
     const sql = `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`;
@@ -59,18 +81,44 @@ export class SqliteStrategy implements IDatabaseStrategy {
     return data;
   }
 
-  public async read(table: string, query: any): Promise<any[]> {
+  public async read<T = any>(
+    table: string,
+    query: any = {},
+    options: QueryOptions = {}
+  ): Promise<T[]> {
+    this.validateQueryOptions(options);
+
     const keys = Object.keys(query);
     const where = keys.length
       ? `WHERE ${keys.map((k) => `${k} = ?`).join(" AND ")}`
       : "";
-    const sql = `SELECT * FROM ${table} ${where}`;
+
+    let sql = `SELECT * FROM ${table} ${where}`;
+
+    if (options.sort) {
+      sql += ` ORDER BY ${options.sort.field} ${options.sort.order.toUpperCase()}`;
+    }
+
+    if (typeof options.limit === "number") {
+      sql += ` LIMIT ${options.limit}`;
+    }
+
+    if (typeof options.offset === "number") {
+      sql += ` OFFSET ${options.offset}`;
+    }
+
     const stmt = this.db.prepare(sql);
     const rows = stmt.all(...Object.values(query));
     return rows;
   }
 
-  public async update(table: string, query: any, data: any): Promise<any> {
+  public async update<T>(
+    table: string,
+    query: any,
+    data: Partial<T>
+  ): Promise<T> {
+    this.validateSchema(table, data, true);
+
     const set = Object.keys(data)
       .map((k) => `${k} = ?`)
       .join(", ");
@@ -80,10 +128,10 @@ export class SqliteStrategy implements IDatabaseStrategy {
     const sql = `UPDATE ${table} SET ${set} WHERE ${where}`;
     this.db.prepare(sql).run(...Object.values(data), ...Object.values(query));
     this.logger?.info({ table, query, data }, "SQLite update");
-    return data;
+    return data as T;
   }
 
-  public async delete(table: string, query: any): Promise<any> {
+  public async delete<T = any>(table: string, query: any): Promise<T> {
     const where = Object.keys(query)
       .map((k) => `${k} = ?`)
       .join(" AND ");
@@ -104,12 +152,24 @@ export class SqliteStrategy implements IDatabaseStrategy {
   }
 
   public on(event: "connect" | "disconnect", listener: () => void): void {
-    if (event === "connect" && this.status === "ready") listener();
-    if (event === "disconnect" && this.status === "error") listener();
+    this.emitter.on(event, listener);
   }
 
-  public async executeRaw(sql: string, params?: any[]): Promise<any> {
+  public async executeRaw(sql: string, params?: any[]): Promise<any[]> {
     const stmt = this.db.prepare(sql);
     return stmt.all(...(params || []));
+  }
+
+  private validateSchema(table: string, data: any, partial = false) {
+    const schema = this.schemas.get(table);
+    if (!schema) return;
+
+    const result = partial
+      ? schema.partial().safeParse(data)
+      : schema.safeParse(data);
+
+    if (!result.success) {
+      throw new Error(`Schema validation failed: ${result.error.message}`);
+    }
   }
 }

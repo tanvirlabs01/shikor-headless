@@ -1,15 +1,20 @@
-import type { Logger } from "pino";
-import { IDatabaseStrategy } from "../../IDatabaseStrategy";
+// packages/core/database/strategies/mock/MockDatabaseStrategy.ts
 
-export class MockDatabaseStrategy implements IDatabaseStrategy {
+import type { Logger } from "pino";
+import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
+import type { QueryOptions } from "../../types/QueryOptions";
+import type { ConnectionStatus } from "../../IDatabaseStrategy";
+
+export class MockDatabaseStrategy extends BaseDatabaseStrategy {
   private db: Record<string, any[]> = {};
-  public status: "ready" = "ready";
-  public ready = Promise.resolve();
+  public status: ConnectionStatus = "ready";
+  public ready: Promise<void> = Promise.resolve();
 
   constructor(
-    private config: Record<string, any>,
+    private config: Record<string, any> = {},
     private logger?: Logger
   ) {
+    super();
     this.logger?.info(
       { module: "mock-db" },
       "MockDatabaseStrategy initialized"
@@ -20,51 +25,95 @@ export class MockDatabaseStrategy implements IDatabaseStrategy {
     this.logger?.info({ module: "mock-db" }, "Mock database connect() called");
   }
 
-  async create(table: string, data: any) {
-    if (!this.db[table]) this.db[table] = [];
-    const item = { ...data, id: this.db[table].length + 1 };
-    this.db[table].push(item);
-    this.logger?.info({ table, data: item, module: "mock-db" }, "Mock create");
+  async disconnect(): Promise<void> {
+    this.logger?.info({ module: "mock-db" }, "Mock database disconnected");
+  }
+
+  async create(collection: string, data: any): Promise<any> {
+    if (!this.db[collection]) this.db[collection] = [];
+
+    const item = { ...data, id: this.db[collection].length + 1 };
+    this.db[collection].push(item);
+
+    this.logger?.info(
+      { collection, data: item, module: "mock-db" },
+      "Mock create"
+    );
     return item;
   }
 
-  async read(table: string, query: any) {
-    const result = (this.db[table] || []).filter((item) =>
+  async read(
+    collection: string,
+    query: any = {},
+    options: QueryOptions = {}
+  ): Promise<any> {
+    this.validateQueryOptions(options);
+
+    let results = [...(this.db[collection] || [])].filter((item) =>
       Object.keys(query).every((key) => item[key] === query[key])
     );
-    this.logger?.info({ table, query, result, module: "mock-db" }, "Mock read");
-    return result;
+
+    if (options.sort) {
+      const { field, order } = options.sort;
+      results.sort((a, b) =>
+        a[field] < b[field]
+          ? order === "asc"
+            ? -1
+            : 1
+          : a[field] > b[field]
+            ? order === "asc"
+              ? 1
+              : -1
+            : 0
+      );
+    }
+
+    if (typeof options.offset === "number") {
+      results = results.slice(options.offset);
+    }
+
+    if (typeof options.limit === "number") {
+      results = results.slice(0, options.limit);
+    }
+
+    this.logger?.info(
+      { collection, query, options, result: results, module: "mock-db" },
+      "Mock read"
+    );
+    return results;
   }
 
-  async update(table: string, query: any, data: any) {
-    const items = await this.read(table, query);
+  async update(collection: string, query: any, data: any): Promise<any> {
+    const items = await this.read(collection, query);
     const updated = items.map((item) => Object.assign(item, data));
-    this.logger?.info({ table, updated, module: "mock-db" }, "Mock update");
+
+    this.logger?.info(
+      { collection, updated, module: "mock-db" },
+      "Mock update"
+    );
     return updated;
   }
 
-  async delete(table: string, query: any) {
-    const items = await this.read(table, query);
-    this.db[table] = (this.db[table] || []).filter(
+  async delete(collection: string, query: any): Promise<any> {
+    const items = await this.read(collection, query);
+    this.db[collection] = (this.db[collection] || []).filter(
       (item) => !items.includes(item)
     );
+
     this.logger?.info(
-      { table, deleted: items, module: "mock-db" },
+      { collection, deleted: items, module: "mock-db" },
       "Mock delete"
     );
     return items;
   }
 
-  async healthCheck() {
+  async healthCheck(): Promise<{ ok: boolean; latency: number }> {
     this.logger?.info({ module: "mock-db" }, "Mock health check OK");
     return { ok: true, latency: 0 };
   }
 
-  async disconnect() {
-    this.logger?.info({ module: "mock-db" }, "Mock database disconnected");
-  }
-
-  on(event: "connect" | "disconnect", listener: () => void) {
+  on(event: "connect" | "disconnect", listener: () => void): void {
+    // This is a no-op in mock, but you can simulate if needed
     listener();
   }
 }

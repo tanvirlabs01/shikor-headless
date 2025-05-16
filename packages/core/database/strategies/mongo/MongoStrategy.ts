@@ -1,15 +1,18 @@
-// File: packages/core/database/strategies/mongo/MongoStrategy.ts
 import {
   MongoClient,
   Db,
-  ObjectId,
-  Filter,
-  WithId,
-  OptionalUnlessRequiredId,
   Document,
+  Filter,
+  OptionalUnlessRequiredId,
+  WithId,
 } from "mongodb";
-import type { IDatabaseStrategy } from "../../IDatabaseStrategy";
+import { EventEmitter } from "events";
+import { z, ZodSchema } from "zod";
 import type { Logger } from "pino";
+import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
+import type { QueryOptions } from "../../types/QueryOptions";
+import type { ConnectionStatus } from "../../IDatabaseStrategy";
+import { ZodObject, ZodRawShape } from "zod"; // 👈 add this to your imports
 
 export type MongoConfig = {
   connectionString: string;
@@ -18,28 +21,32 @@ export type MongoConfig = {
   maxRetries?: number;
 };
 
-export class MongoStrategy implements IDatabaseStrategy {
+export class MongoStrategy extends BaseDatabaseStrategy {
   private client!: MongoClient;
   private db!: Db;
-  private connectionPromise?: Promise<void>;
-  private listeners: Record<string, (() => void)[]> = {
-    connect: [],
-    disconnect: [],
-  };
   private retryCount = 0;
-  public status: "connecting" | "ready" | "error" = "connecting";
+  private emitter = new EventEmitter();
+  private schemas: Map<string, ZodSchema<any>> = new Map();
+
+  public status: ConnectionStatus = "connecting";
+  public ready: Promise<void> = Promise.resolve();
 
   constructor(
     private config: MongoConfig,
     private logger?: Logger
   ) {
+    super();
     this.config.maxRetries = this.config.maxRetries ?? 3;
     this.logger?.info({ module: "mongo-db" }, "MongoStrategy initialized");
   }
 
-  // Public interface-compliant method
+  public registerSchema(collection: string, schema: ZodObject<ZodRawShape>) {
+    this.schemas.set(collection, schema);
+  }
+
   public async connect(): Promise<void> {
-    return this.connectWithRetry();
+    this.ready = this.connectWithRetry();
+    return this.ready;
   }
 
   private async connectWithRetry(): Promise<void> {
@@ -48,12 +55,11 @@ export class MongoStrategy implements IDatabaseStrategy {
       this.client = new MongoClient(this.config.connectionString, {
         connectTimeoutMS: this.config.connectTimeoutMS ?? 5000,
       });
-
       await this.client.connect();
       this.db = this.client.db(this.config.dbName);
       this.status = "ready";
       this.retryCount = 0;
-      this.emit("connect");
+      this.emitter.emit("connect");
       this.logger?.info(
         { module: "mongo-db" },
         "MongoDB connected successfully"
@@ -62,16 +68,11 @@ export class MongoStrategy implements IDatabaseStrategy {
       if (this.retryCount < (this.config.maxRetries ?? 3)) {
         this.retryCount++;
         const delay = Math.pow(2, this.retryCount) * 100;
-        this.logger?.warn(
-          { err: error, attempt: this.retryCount, delay },
-          "MongoDB connection failed, retrying..."
-        );
         await new Promise((res) => setTimeout(res, delay));
         return this.connectWithRetry();
       }
-
       this.status = "error";
-      this.emit("disconnect");
+      this.emitter.emit("disconnect");
       this.logger?.error(
         { err: error, module: "mongo-db" },
         "MongoDB connection failed after retries"
@@ -80,31 +81,12 @@ export class MongoStrategy implements IDatabaseStrategy {
     }
   }
 
-  public get ready(): Promise<void> {
-    if (!this.connectionPromise) {
-      this.connectionPromise = this.connectWithRetry();
-    }
-    return this.connectionPromise;
-  }
-
-  private emit(event: "connect" | "disconnect") {
-    this.listeners[event].forEach((listener) => listener());
-  }
-
   public async disconnect(): Promise<void> {
-    try {
-      if (this.client) {
-        await this.client.close();
-        this.status = "error";
-        this.emit("disconnect");
-        this.logger?.info({ module: "mongo-db" }, "MongoDB disconnected");
-      }
-    } catch (error) {
-      this.logger?.error(
-        { err: error, module: "mongo-db" },
-        "MongoDB disconnect failed"
-      );
-      throw error;
+    if (this.client) {
+      await this.client.close();
+      this.status = "error";
+      this.emitter.emit("disconnect");
+      this.logger?.info({ module: "mongo-db" }, "MongoDB disconnected");
     }
   }
 
@@ -112,43 +94,29 @@ export class MongoStrategy implements IDatabaseStrategy {
     collection: string,
     data: OptionalUnlessRequiredId<T>
   ): Promise<WithId<T>> {
-    try {
-      const result = await this.db.collection<T>(collection).insertOne(data);
-      this.logger?.debug(
-        { module: "mongo-db", collection, _id: result.insertedId },
-        "Document created"
-      );
-      return { ...data, _id: result.insertedId } as WithId<T>;
-    } catch (error) {
-      this.logger?.error(
-        { err: error, module: "mongo-db", collection },
-        "Create operation failed"
-      );
-      throw error;
-    }
+    this.validateSchema(collection, data);
+    const result = await this.db.collection<T>(collection).insertOne(data);
+    return { ...data, _id: result.insertedId } as WithId<T>;
   }
 
   public async read<T extends Document>(
     collection: string,
-    query: Filter<T> = {}
+    query: Filter<T> = {},
+    options: QueryOptions = {}
   ): Promise<WithId<T>[]> {
-    try {
-      const result = await this.db
-        .collection<T>(collection)
-        .find(query)
-        .toArray();
-      this.logger?.debug(
-        { module: "mongo-db", collection, count: result.length },
-        "Documents fetched"
-      );
-      return result;
-    } catch (error) {
-      this.logger?.error(
-        { err: error, module: "mongo-db", collection },
-        "Read operation failed"
-      );
-      throw error;
+    this.validateQueryOptions(options);
+
+    const cursor = this.db.collection<T>(collection).find(query);
+
+    if (options.sort) {
+      const sortOrder = options.sort.order === "desc" ? -1 : 1;
+      cursor.sort({ [options.sort.field]: sortOrder });
     }
+
+    if (typeof options.offset === "number") cursor.skip(options.offset);
+    if (typeof options.limit === "number") cursor.limit(options.limit);
+
+    return await cursor.toArray();
   }
 
   public async update<T extends Document>(
@@ -156,66 +124,52 @@ export class MongoStrategy implements IDatabaseStrategy {
     query: Filter<T>,
     data: Partial<T>
   ): Promise<number> {
-    try {
-      const result = await this.db
-        .collection<T>(collection)
-        .updateMany(query, { $set: data });
-      this.logger?.debug(
-        { module: "mongo-db", collection, modified: result.modifiedCount },
-        "Documents updated"
-      );
-      return result.modifiedCount;
-    } catch (error) {
-      this.logger?.error(
-        { err: error, module: "mongo-db", collection },
-        "Update operation failed"
-      );
-      throw error;
-    }
+    this.validateSchema(collection, data, true);
+    const result = await this.db
+      .collection<T>(collection)
+      .updateMany(query, { $set: data });
+    return result.modifiedCount;
   }
 
   public async delete<T extends Document>(
     collection: string,
     query: Filter<T>
   ): Promise<number> {
-    try {
-      const result = await this.db.collection<T>(collection).deleteMany(query);
-      this.logger?.debug(
-        { module: "mongo-db", collection, deleted: result.deletedCount },
-        "Documents deleted"
-      );
-      return result.deletedCount;
-    } catch (error) {
-      this.logger?.error(
-        { err: error, module: "mongo-db", collection },
-        "Delete operation failed"
-      );
-      throw error;
-    }
+    const result = await this.db.collection<T>(collection).deleteMany(query);
+    return result.deletedCount;
   }
 
   public async healthCheck(): Promise<{ ok: boolean; latency: number }> {
     const start = Date.now();
     try {
       await this.db.command({ ping: 1 });
-      if (this.config.dbName) {
-        const dbs = await this.client.db().admin().listDatabases();
-        if (!dbs.databases.some((db) => db.name === this.config.dbName)) {
-          throw new Error(`Database ${this.config.dbName} not found`);
-        }
-      }
       return { ok: true, latency: Date.now() - start };
-    } catch (error) {
+    } catch (err) {
       this.status = "error";
-      this.logger?.error(
-        { err: error, module: "mongo-db" },
-        "MongoDB health check failed"
-      );
       return { ok: false, latency: Date.now() - start };
     }
   }
 
   public on(event: "connect" | "disconnect", listener: () => void): void {
-    this.listeners[event].push(listener);
+    this.emitter.on(event, listener);
+  }
+
+  private validateSchema(collection: string, data: any, partial = false) {
+    const schema = this.schemas.get(collection);
+    if (!schema) return;
+
+    if (schema instanceof ZodObject) {
+      const result = partial
+        ? schema.partial().safeParse(data)
+        : schema.safeParse(data);
+
+      if (!result.success) {
+        throw new Error(`Schema validation failed: ${result.error.message}`);
+      }
+    } else {
+      throw new Error(
+        `Registered schema for '${collection}' is not a ZodObject`
+      );
+    }
   }
 }
