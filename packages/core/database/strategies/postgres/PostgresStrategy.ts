@@ -1,19 +1,19 @@
-import { Pool, PoolClient, QueryResult } from "pg";
+import { Pool, QueryResult } from "pg";
 import { EventEmitter } from "events";
 import type { Logger } from "pino";
-import { IDatabaseStrategy } from "../../IDatabaseStrategy";
+import { z, ZodObject, ZodRawShape } from "zod";
+import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
+import type { QueryOptions } from "../../types/QueryOptions";
+import type { ConnectionStatus } from "../../IDatabaseStrategy";
 
-type QueryOptions = {
-  timeout?: number;
-  transaction?: PoolClient;
-};
-
-export class PostgresStrategy implements IDatabaseStrategy {
+export class PostgresStrategy extends BaseDatabaseStrategy {
   private pool: Pool;
-  private connectionPromise?: Promise<void>;
   private emitter = new EventEmitter();
+  private schemas: Map<string, ZodObject<ZodRawShape>> = new Map();
   private retryCount = 0;
-  public status: "connecting" | "ready" | "error" = "connecting";
+
+  public status: ConnectionStatus = "connecting";
+  public ready: Promise<void> = Promise.resolve();
 
   constructor(
     private config: {
@@ -30,16 +30,17 @@ export class PostgresStrategy implements IDatabaseStrategy {
     },
     private logger?: Logger
   ) {
+    super();
     this.pool = new Pool({
-      host: this.config.host,
-      port: this.config.port,
-      user: this.config.user,
-      password: this.config.password,
-      database: this.config.database,
-      ssl: this.config.ssl,
-      max: this.config.poolSize || 10,
-      idleTimeoutMillis: this.config.idleTimeout || 30000,
-      connectionTimeoutMillis: this.config.connectionTimeout || 5000,
+      host: config.host,
+      port: config.port,
+      user: config.user,
+      password: config.password,
+      database: config.database,
+      ssl: config.ssl,
+      max: config.poolSize || 10,
+      idleTimeoutMillis: config.idleTimeout || 30000,
+      connectionTimeoutMillis: config.connectionTimeout || 5000,
     });
 
     this.pool.on("error", (err) => {
@@ -49,47 +50,32 @@ export class PostgresStrategy implements IDatabaseStrategy {
     });
   }
 
-  // Public interface methods
-  public get ready(): Promise<void> {
-    if (!this.connectionPromise) {
-      this.connectionPromise = this.connectWithRetry();
-    }
-    return this.connectionPromise;
+  public registerSchema<T>(table: string, schema: ZodObject<ZodRawShape>) {
+    this.schemas.set(table, schema);
   }
 
   public async connect(): Promise<void> {
-    return this.connectWithRetry();
+    this.ready = this.connectWithRetry();
+    return this.ready;
   }
 
   private async connectWithRetry(): Promise<void> {
     try {
       this.status = "connecting";
       const client = await this.pool.connect();
-
-      // Validate connection
       await client.query("SELECT 1");
-      await this.validateDatabaseVersion(client);
-
       client.release();
       this.status = "ready";
       this.retryCount = 0;
-      this.logger?.info(
-        { module: "database" },
-        "PostgreSQL connected successfully"
-      );
       this.emitter.emit("connect");
+      this.logger?.info({ module: "database" }, "PostgreSQL connected");
     } catch (error) {
       if (this.retryCount < (this.config.maxRetries ?? 3)) {
         this.retryCount++;
         const delay = Math.pow(2, this.retryCount) * 100;
-        this.logger?.warn(
-          { err: error, attempt: this.retryCount, delay },
-          "PostgreSQL connection failed, retrying..."
-        );
         await new Promise((res) => setTimeout(res, delay));
         return this.connectWithRetry();
       }
-
       this.status = "error";
       this.logger?.error(
         { err: error, module: "database" },
@@ -99,125 +85,84 @@ export class PostgresStrategy implements IDatabaseStrategy {
     }
   }
 
-  private async validateDatabaseVersion(client: PoolClient): Promise<void> {
-    const { rows } = await client.query("SHOW server_version");
-    this.logger?.debug(
-      { version: rows[0].server_version, module: "database" },
-      "Database version check"
-    );
-  }
-
   public async disconnect(): Promise<void> {
-    try {
-      await this.pool.end();
-      this.status = "error";
-      this.connectionPromise = undefined;
-      this.emitter.emit("disconnect");
-      this.logger?.info({ module: "database" }, "PostgreSQL disconnected");
-    } catch (error) {
-      this.logger?.error(
-        { err: error, module: "database" },
-        "PostgreSQL disconnection failed"
-      );
-      throw error;
-    }
+    await this.pool.end();
+    this.status = "error";
+    this.emitter.emit("disconnect");
+    this.logger?.info({ module: "database" }, "PostgreSQL disconnected");
   }
 
-  // CRUD Operations with Type Safety
-  public async create<T = any>(table: string, data: Partial<T>): Promise<T> {
-    const sql = `INSERT INTO ${this.sanitizeIdentifier(table)} (${Object.keys(
-      data
-    )
-      .map((k) => this.sanitizeIdentifier(k))
-      .join(", ")}) VALUES (${Object.keys(data)
-      .map((_, i) => `$${i + 1}`)
-      .join(", ")}) RETURNING *`;
+  public async create<T>(table: string, data: Partial<T>): Promise<T> {
+    this.validateSchema(table, data);
 
-    const result = await this.queryWithLog<T>(sql, Object.values(data));
+    const keys = Object.keys(data);
+    const values = Object.values(data);
+    const placeholders = keys.map((_, i) => `$${i + 1}`).join(", ");
+    const sql = `
+      INSERT INTO ${this.safeId(table)} (${keys.map(this.safeId).join(", ")})
+      VALUES (${placeholders})
+      RETURNING *`;
+    const result = await this.query<T>(sql, values);
     return result.rows[0];
   }
 
-  public async createBulk<T = any>(
-    table: string,
-    items: Partial<T>[]
-  ): Promise<T[]> {
-    if (items.length === 0) return [];
-
-    const keys = Object.keys(items[0]);
-    const values = items.flatMap((item) => Object.values(item));
-    const placeholders = items
-      .map(
-        (_, i) =>
-          `(${keys.map((_, j) => `$${i * keys.length + j + 1}`).join(", ")})`
-      )
-      .join(", ");
-
-    const sql = `INSERT INTO ${this.sanitizeIdentifier(table)} (${keys.map((k) => this.sanitizeIdentifier(k)).join(", ")}) 
-                VALUES ${placeholders} RETURNING *`;
-    const result = await this.queryWithLog<T>(sql, values);
-    return result.rows;
-  }
-
-  public async read<T = any>(
+  public async read<T>(
     table: string,
     queryObj: Record<string, any> = {},
-    options?: {
-      limit?: number;
-      offset?: number;
-      orderBy?: string;
-      orderDirection?: "ASC" | "DESC";
-      fields?: string[];
-    }
+    options: QueryOptions = {}
   ): Promise<T[]> {
+    this.validateQueryOptions(options);
+
     const keys = Object.keys(queryObj);
     const values = Object.values(queryObj);
-    const fields =
-      options?.fields?.map((f) => this.sanitizeIdentifier(f)).join(", ") || "*";
 
-    let sql = `SELECT ${fields} FROM ${this.sanitizeIdentifier(table)}`;
-
+    let sql = `SELECT * FROM ${this.safeId(table)}`;
     if (keys.length) {
-      sql += ` WHERE ${keys.map((k, i) => `${this.sanitizeIdentifier(k)} = $${i + 1}`).join(" AND ")}`;
+      sql += ` WHERE ${keys
+        .map((k, i) => `${this.safeId(k)} = $${i + 1}`)
+        .join(" AND ")}`;
     }
 
-    if (options?.orderBy) {
-      sql += ` ORDER BY ${this.sanitizeIdentifier(options.orderBy)} ${options.orderDirection || "ASC"}`;
+    if (options.sort) {
+      sql += ` ORDER BY ${this.safeId(options.sort.field)} ${
+        options.sort.order.toUpperCase() === "DESC" ? "DESC" : "ASC"
+      }`;
     }
 
-    if (options?.limit) {
+    if (typeof options.limit === "number") {
       values.push(options.limit);
       sql += ` LIMIT $${values.length}`;
     }
 
-    if (options?.offset) {
+    if (typeof options.offset === "number") {
       values.push(options.offset);
       sql += ` OFFSET $${values.length}`;
     }
 
-    const result = await this.queryWithLog<T>(sql, values);
+    const result = await this.query<T>(sql, values);
     return result.rows;
   }
 
-  public async update<T = any>(
+  public async update<T>(
     table: string,
     queryObj: Record<string, any>,
     data: Partial<T>
   ): Promise<T> {
+    this.validateSchema(table, data, true);
+
     const dataKeys = Object.keys(data);
     const queryKeys = Object.keys(queryObj);
     const values = [...Object.values(data), ...Object.values(queryObj)];
 
     const setClause = dataKeys
-      .map((k, i) => `${this.sanitizeIdentifier(k)} = $${i + 1}`)
+      .map((k, i) => `${this.safeId(k)} = $${i + 1}`)
       .join(", ");
     const whereClause = queryKeys
-      .map(
-        (k, i) => `${this.sanitizeIdentifier(k)} = $${i + dataKeys.length + 1}`
-      )
+      .map((k, i) => `${this.safeId(k)} = $${i + dataKeys.length + 1}`)
       .join(" AND ");
 
-    const sql = `UPDATE ${this.sanitizeIdentifier(table)} SET ${setClause} WHERE ${whereClause} RETURNING *`;
-    const result = await this.queryWithLog<T>(sql, values);
+    const sql = `UPDATE ${this.safeId(table)} SET ${setClause} WHERE ${whereClause} RETURNING *`;
+    const result = await this.query<T>(sql, values);
     return result.rows[0];
   }
 
@@ -227,153 +172,66 @@ export class PostgresStrategy implements IDatabaseStrategy {
   ): Promise<T> {
     const keys = Object.keys(queryObj);
     const values = Object.values(queryObj);
-
     const whereClause = keys
-      .map((k, i) => `${this.sanitizeIdentifier(k)} = $${i + 1}`)
+      .map((k, i) => `${this.safeId(k)} = $${i + 1}`)
       .join(" AND ");
 
-    const sql = `DELETE FROM ${this.sanitizeIdentifier(table)} WHERE ${whereClause} RETURNING *`;
-    const result = await this.queryWithLog<T>(sql, values);
+    const sql = `DELETE FROM ${this.safeId(table)} WHERE ${whereClause} RETURNING *`;
+    const result = await this.query<T>(sql, values);
     return result.rows[0];
   }
 
-  // Transaction Support
-  public async transaction<T>(
-    callback: (client: PoolClient) => Promise<T>
-  ): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const result = await callback(client);
-      await client.query("COMMIT");
-      this.logger?.info({ module: "database" }, "Transaction committed");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      this.logger?.error(
-        { err: error, module: "database" },
-        "Transaction rolled back"
-      );
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  // Health Monitoring
-  public async healthCheck(): Promise<{
-    ok: boolean;
-    latency: number;
-    details?: {
-      version?: string;
-      activeConnections?: number;
-      poolStatus?: {
-        total: number;
-        idle: number;
-        waiting: number;
-      };
-    };
-  }> {
+  public async healthCheck(): Promise<{ ok: boolean; latency: number }> {
     const start = Date.now();
     try {
-      const client = await this.pool.connect();
-      try {
-        const [pingResult, versionResult, activityResult] = await Promise.all([
-          client.query("SELECT 1"),
-          client.query("SHOW server_version"),
-          client.query(
-            "SELECT COUNT(*) AS active FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
-          ),
-        ]);
-
-        return {
-          ok: true,
-          latency: Date.now() - start,
-          details: {
-            version: versionResult.rows[0].server_version,
-            activeConnections: activityResult.rows[0].active,
-            poolStatus: this.getPoolMetrics(),
-          },
-        };
-      } finally {
-        client.release();
-      }
-    } catch (error) {
-      return {
-        ok: false,
-        latency: Date.now() - start,
-      };
+      const result = await this.pool.query("SELECT 1");
+      if (result.rowCount !== 1) throw new Error("Bad ping result");
+      return { ok: true, latency: Date.now() - start };
+    } catch {
+      this.status = "error";
+      return { ok: false, latency: Date.now() - start };
     }
   }
 
-  public getPoolMetrics() {
-    return {
-      total: this.pool.totalCount,
-      idle: this.pool.idleCount,
-      waiting: this.pool.waitingCount,
-    };
-  }
-
-  // Event Handling
   public on(event: "connect" | "disconnect", listener: () => void): void {
     this.emitter.on(event, listener);
   }
 
-  // Raw SQL Execution
-  public async executeRaw<T = any>(
+  private async query<T = any>(
     sql: string,
-    params?: any[],
-    options?: QueryOptions
-  ): Promise<QueryResult<T>> {
-    return this.queryWithLog<T>(sql, params, options);
-  }
-
-  // Internal Methods
-  private async queryWithLog<T = any>(
-    sql: string,
-    params?: any[],
-    options?: QueryOptions
+    params?: any[]
   ): Promise<QueryResult<T>> {
     const start = Date.now();
-    const { timeout = 5000, transaction } = options || {};
-
     try {
-      const client = transaction || (await this.pool.connect());
-      try {
-        await client.query(`SET LOCAL statement_timeout = ${timeout}`);
-        const result = await client.query(sql, params);
-        const duration = Date.now() - start;
-
-        this.logger?.debug(
-          {
-            sql,
-            params,
-            duration,
-            module: "database",
-          },
-          "Query executed"
-        );
-
-        return result;
-      } finally {
-        if (!transaction) client.release();
-      }
+      const result = await this.pool.query(sql, params);
+      this.logger?.debug(
+        { sql, params, duration: Date.now() - start, module: "database" },
+        "Query executed"
+      );
+      return result;
     } catch (error) {
       this.logger?.error(
         { sql, params, err: error, module: "database" },
-        "Query error"
+        "Query failed"
       );
       throw error;
     }
   }
 
-  private sanitizeIdentifier(identifier: string): string {
-    return `"${identifier.replace(/"/g, '""')}"`;
+  private safeId(id: string): string {
+    return `"${id.replace(/"/g, '""')}"`;
   }
 
-  // Cleanup
-  public async destroy() {
-    this.emitter.removeAllListeners();
-    await this.disconnect();
+  private validateSchema(table: string, data: any, partial = false) {
+    const schema = this.schemas.get(table);
+    if (!schema) return;
+
+    const result = partial
+      ? schema.partial().safeParse(data)
+      : schema.safeParse(data);
+
+    if (!result.success) {
+      throw new Error(`Schema validation failed: ${result.error.message}`);
+    }
   }
 }
