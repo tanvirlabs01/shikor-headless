@@ -11,6 +11,7 @@ import {
   PostgresConfig,
   MockConfig,
   MongoConfig,
+  SqliteConfig,
 } from "@shikor/core/database/types";
 
 class AppError extends Error {
@@ -217,7 +218,8 @@ async function initializeDatabase() {
   const engine = (process.env.DB_ENGINE || "mock") as
     | "mock"
     | "postgres"
-    | "mongo";
+    | "mongo"
+    | "sqlite";
   const config = getDatabaseConfig(engine);
 
   dbLogger.info({ engine }, "Initializing database connection");
@@ -238,6 +240,12 @@ async function initializeDatabase() {
         db = await DatabaseStrategyFactory.create(
           "mongo",
           config as MongoConfig
+        );
+        break;
+      case "sqlite":
+        db = await DatabaseStrategyFactory.create(
+          "sqlite",
+          config as SqliteConfig
         );
         break;
       default:

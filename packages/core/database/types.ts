@@ -3,9 +3,10 @@ import type { IDatabaseStrategy } from "./IDatabaseStrategy";
 import type { MockDatabaseStrategy } from "./strategies/mock/MockDatabaseStrategy";
 import type { PostgresStrategy } from "./strategies/postgres/PostgresStrategy";
 import type { MongoStrategy } from "./strategies/mongo/MongoStrategy";
+import { SqliteStrategy } from "./strategies/sqlite/SqliteStrategy";
 
 /** Built-in engine names */
-export type BuiltinEngine = "mock" | "postgres" | "mongo"; // ✅ Added mongo
+export type BuiltinEngine = "mock" | "postgres" | "mongo" | "sqlite"; // ✅ Added mongo
 
 /** Custom engine name pattern */
 export type CustomEngine = `custom:${string}`;
@@ -52,6 +53,10 @@ export interface MongoConfig extends BaseDatabaseConfig {
   connectTimeoutMS?: number;
 }
 
+/** Sqlite Configuration */
+export type SqliteConfig = {
+  filepath: string; // Absolute or relative path to .sqlite file
+};
 /** Generic factory function type */
 export type StrategyFactoryFn<C, S extends IDatabaseStrategy> = (
   config: C,
@@ -62,7 +67,8 @@ export type StrategyFactoryFn<C, S extends IDatabaseStrategy> = (
 export type StrategyFactoryMap = {
   mock: StrategyFactoryFn<MockConfig, MockDatabaseStrategy>;
   postgres: StrategyFactoryFn<PostgresConfig, PostgresStrategy>;
-  mongo: StrategyFactoryFn<MongoConfig, MongoStrategy>; // ✅ Added mongo
+  mongo: StrategyFactoryFn<MongoConfig, MongoStrategy>;
+  sqlite: StrategyFactoryFn<SqliteConfig, SqliteStrategy>;
 };
 
 /** Configuration for custom strategies */

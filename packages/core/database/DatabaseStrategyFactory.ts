@@ -9,10 +9,13 @@ import type {
   MockConfig,
   PostgresConfig,
   MongoConfig,
+  SqliteConfig,
 } from "./types";
 import { MockDatabaseStrategy } from "./strategies/mock/MockDatabaseStrategy";
 import { PostgresStrategy } from "./strategies/postgres/PostgresStrategy";
 import { MongoStrategy } from "./strategies/mongo/MongoStrategy";
+import { SqliteStrategy } from "./strategies/sqlite/SqliteStrategy";
+import { logger } from "../src/telemetry/logger";
 
 export class DatabaseStrategyFactory {
   private static customStrategies = new Map<
@@ -27,6 +30,7 @@ export class DatabaseStrategyFactory {
     mock: (config, logger) => new MockDatabaseStrategy(config, logger),
     postgres: (config, logger) => new PostgresStrategy(config, logger),
     mongo: (config, logger) => new MongoStrategy(config, logger),
+    sqlite: (config, logger) => new SqliteStrategy(config, logger),
   };
 
   static setLogger(logger: Logger): void {
@@ -46,6 +50,10 @@ export class DatabaseStrategyFactory {
     engine: "mongo",
     config: MongoConfig
   ): Promise<MongoStrategy>;
+  static async create(
+    engine: "sqlite",
+    config: SqliteConfig
+  ): Promise<SqliteStrategy>;
   static async create(
     engine: CustomEngine,
     config: any
@@ -67,6 +75,7 @@ export class DatabaseStrategyFactory {
     const customConfig = this.customStrategies.get(engine) as
       | CustomStrategyConfig<T>
       | undefined;
+
     if (!customConfig) {
       throw new Error(`Unregistered custom engine: ${engine}`);
     }
@@ -88,39 +97,13 @@ export class DatabaseStrategyFactory {
 
   private static async createBuiltinStrategy(
     engine: BuiltinEngine,
-    config: MockConfig | PostgresConfig | MongoConfig
+    config: MockConfig | PostgresConfig | MongoConfig | SqliteConfig
   ): Promise<IDatabaseStrategy> {
-    switch (engine) {
-      case "mock": {
-        const factory = this.builtinStrategies["mock"];
-        const typedConfig = config as MockConfig;
-        const instance = factory(typedConfig, this.dbLogger);
-        await instance.ready;
-        this.dbLogger?.info({ engine }, "Initialized mock database");
-        return instance;
-      }
-
-      case "postgres": {
-        const factory = this.builtinStrategies["postgres"];
-        const typedConfig = config as PostgresConfig;
-        const instance = factory(typedConfig, this.dbLogger);
-        await instance.ready;
-        this.dbLogger?.info({ engine }, "Initialized postgres database");
-        return instance;
-      }
-
-      case "mongo": {
-        const factory = this.builtinStrategies["mongo"];
-        const typedConfig = config as MongoConfig;
-        const instance = factory(typedConfig, this.dbLogger);
-        await instance.ready;
-        this.dbLogger?.info({ engine }, "Initialized mongo database");
-        return instance;
-      }
-
-      default:
-        throw new Error(`Unsupported built-in engine: ${engine}`);
-    }
+    const factory = this.builtinStrategies[engine];
+    const instance = factory(config as any, this.dbLogger);
+    await instance.ready;
+    this.dbLogger?.info({ engine }, `Initialized ${engine} database`);
+    return instance;
   }
 
   static registerCustomEngine<T>(
@@ -132,6 +115,7 @@ export class DatabaseStrategyFactory {
         `Custom engine must start with 'custom:', got '${engine}'`
       );
     }
+
     if (this.hasEngine(engine)) {
       throw new Error(`Engine '${engine}' is already registered`);
     }
@@ -159,14 +143,25 @@ export class DatabaseStrategyFactory {
     }
 
     const schemas: Record<BuiltinEngine, object> = {
-      mock: {
-        // schema for mock config
-      },
+      mock: {},
       postgres: {
-        // schema for postgres config
+        host: "string",
+        port: "number",
+        user: "string",
+        password: "string",
+        database: "string",
+        ssl: "boolean",
+        poolSize: "number",
+        idleTimeout: "number",
       },
       mongo: {
-        // schema for mongo config
+        connectionString: "string",
+        dbName: "string",
+      },
+      sqlite: {
+        filepath: "string",
+        readonly: "boolean",
+        timeout: "number",
       },
     };
 

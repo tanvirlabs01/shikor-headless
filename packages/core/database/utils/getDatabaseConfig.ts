@@ -1,15 +1,22 @@
-import { MockConfig, PostgresConfig, MongoConfig } from "../types";
+import {
+  MockConfig,
+  PostgresConfig,
+  MongoConfig,
+  SqliteConfig,
+} from "../types";
 
-type Engine = "mock" | "postgres" | "mongo";
+type Engine = "mock" | "postgres" | "mongo" | "sqlite";
 
 // ✅ Add union signature overload
-export function getDatabaseConfig(engine: "mock"): MockConfig;
-export function getDatabaseConfig(engine: "postgres"): PostgresConfig;
-export function getDatabaseConfig(engine: "mongo"): MongoConfig;
-export function getDatabaseConfig(
-  engine: Engine
-): MockConfig | PostgresConfig | MongoConfig;
-
+export function getDatabaseConfig<T extends Engine>(
+  engine: T
+): T extends "mock"
+  ? MockConfig
+  : T extends "postgres"
+    ? PostgresConfig
+    : T extends "mongo"
+      ? MongoConfig
+      : SqliteConfig;
 // ✅ Implementation
 export function getDatabaseConfig(
   engine: Engine
@@ -25,16 +32,20 @@ export function getDatabaseConfig(
         ssl: process.env.POSTGRES_SSL === "true",
         poolSize: Number(process.env.POSTGRES_POOL_SIZE || 10),
         idleTimeout: Number(process.env.POSTGRES_IDLE_TIMEOUT || 30000),
-      };
+      } as PostgresConfig;
 
     case "mongo":
       return {
         connectionString: process.env.MONGO_URL!,
         dbName: process.env.MONGO_DB_NAME!,
-      };
+      } as MongoConfig;
+    case "sqlite":
+      return {
+        filepath: process.env.SQLITE_DB_PATH!,
+      } as SqliteConfig;
 
     case "mock":
     default:
-      return {};
+      return {} as MockConfig;
   }
 }
