@@ -8,6 +8,12 @@ import { z, ZodObject, ZodRawShape } from "zod";
 import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
 import type { ConnectionStatus } from "../../IDatabaseStrategy";
 import type { QueryOptions } from "../../types/QueryOptions";
+import { Config } from "../../../config/config";
+import { SqliteConfigSchema } from "./config";
+
+Config.registerModuleSchema("sqlite", SqliteConfigSchema);
+
+// Your SqliteStrategy implementation below...
 
 export class SqliteStrategy extends BaseDatabaseStrategy {
   private db!: Database.Database;

@@ -5,6 +5,12 @@ import { z, ZodObject, ZodRawShape } from "zod";
 import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
 import type { QueryOptions } from "../../types/QueryOptions";
 import type { ConnectionStatus } from "../../IDatabaseStrategy";
+import { Config } from "../../../config/config";
+import { PostgresConfigSchema } from "./config";
+
+Config.registerModuleSchema("postgres", PostgresConfigSchema);
+
+// Your PostgresStrategy implementation below...
 
 export class PostgresStrategy extends BaseDatabaseStrategy {
   private pool: Pool;

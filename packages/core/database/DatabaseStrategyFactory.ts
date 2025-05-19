@@ -1,5 +1,4 @@
 import type { Logger } from "pino";
-import type { IDatabaseStrategy } from "./IDatabaseStrategy";
 import type {
   DatabaseEngine,
   BuiltinEngine,
@@ -11,18 +10,19 @@ import type {
   MongoConfig,
   SqliteConfig,
 } from "./types";
+
 import { MockDatabaseStrategy } from "./strategies/mock/MockDatabaseStrategy";
 import { PostgresStrategy } from "./strategies/postgres/PostgresStrategy";
 import { MongoStrategy } from "./strategies/mongo/MongoStrategy";
 import { SqliteStrategy } from "./strategies/sqlite/SqliteStrategy";
-import { logger } from "../src/telemetry/logger";
+import { Config } from "../config/config";
+import { IDatabaseStrategy } from "./IDatabaseStrategy";
 
 export class DatabaseStrategyFactory {
   private static customStrategies = new Map<
     CustomEngine,
     CustomStrategyConfig<any>
   >();
-
   private static baseLogger?: Logger;
   private static dbLogger?: Logger;
 
@@ -58,6 +58,19 @@ export class DatabaseStrategyFactory {
     engine: CustomEngine,
     config: any
   ): Promise<IDatabaseStrategy>;
+  static async create<T extends DatabaseEngine>(
+    engine: T,
+    config: T extends "mock"
+      ? MockConfig
+      : T extends "postgres"
+        ? PostgresConfig
+        : T extends "mongo"
+          ? MongoConfig
+          : T extends "sqlite"
+            ? SqliteConfig
+            : any
+  ): Promise<IDatabaseStrategy>;
+
   static async create(
     engine: DatabaseEngine,
     config: any
@@ -75,7 +88,6 @@ export class DatabaseStrategyFactory {
     const customConfig = this.customStrategies.get(engine) as
       | CustomStrategyConfig<T>
       | undefined;
-
     if (!customConfig) {
       throw new Error(`Unregistered custom engine: ${engine}`);
     }
@@ -97,10 +109,26 @@ export class DatabaseStrategyFactory {
 
   private static async createBuiltinStrategy(
     engine: BuiltinEngine,
-    config: MockConfig | PostgresConfig | MongoConfig | SqliteConfig
+    config: any
   ): Promise<IDatabaseStrategy> {
+    const schema = Config.getModuleSchema(engine);
+    if (!schema) {
+      throw new Error(`Missing config schema for engine "${engine}"`);
+    }
+
+    const result = Config.validate({ [engine]: config });
+    if (!result.success) {
+      this.dbLogger?.error(
+        { engine, errors: result.errors },
+        `Config validation failed`
+      );
+      throw new Error(
+        `Invalid config for "${engine}":\n${result.errors?.join("\n")}`
+      );
+    }
+
     const factory = this.builtinStrategies[engine];
-    const instance = factory(config as any, this.dbLogger);
+    const instance = factory(config, this.dbLogger);
     await instance.ready;
     this.dbLogger?.info({ engine }, `Initialized ${engine} database`);
     return instance;
@@ -130,41 +158,19 @@ export class DatabaseStrategyFactory {
       : engine in this.builtinStrategies;
   }
 
-  static listEngines(): DatabaseEngine[] {
-    return [
-      ...(Object.keys(this.builtinStrategies) as BuiltinEngine[]),
-      ...Array.from(this.customStrategies.keys()),
-    ];
-  }
-
   static getEngineConfigSchema(engine: DatabaseEngine): object | undefined {
     if (engine.startsWith("custom:")) {
       return this.customStrategies.get(engine as CustomEngine)?.configSchema;
     }
 
-    const schemas: Record<BuiltinEngine, object> = {
-      mock: {},
-      postgres: {
-        host: "string",
-        port: "number",
-        user: "string",
-        password: "string",
-        database: "string",
-        ssl: "boolean",
-        poolSize: "number",
-        idleTimeout: "number",
-      },
-      mongo: {
-        connectionString: "string",
-        dbName: "string",
-      },
-      sqlite: {
-        filepath: "string",
-        readonly: "boolean",
-        timeout: "number",
-      },
-    };
+    const schema = Config.getModuleSchema(engine);
+    return schema ?? undefined;
+  }
 
-    return schemas[engine as BuiltinEngine];
+  static listEngines(): DatabaseEngine[] {
+    return [
+      ...(Object.keys(this.builtinStrategies) as BuiltinEngine[]),
+      ...Array.from(this.customStrategies.keys()),
+    ];
   }
 }

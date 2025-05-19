@@ -1,3 +1,4 @@
+// server/index.ts
 import express, { Request, Response, NextFunction } from "express";
 import cluster from "cluster";
 import os from "os";
@@ -5,53 +6,41 @@ import helmet from "helmet";
 import { logger, dbLogger } from "@shikor/core/src/telemetry/logger";
 import { httpLogger } from "@shikor/core/src/utils/httpLogger";
 import { env } from "@shikor/core/src/config";
+import { Config } from "@shikor/core/config/config";
+import "@shikor/core/database/strategies/postgres";
+import "@shikor/core/database/strategies/mongo";
+import "@shikor/core/database/strategies/sqlite";
+import "@shikor/core/database/strategies/mock";
 import { DatabaseStrategyFactory } from "@shikor/core/database";
-import { getDatabaseConfig } from "@shikor/core/database/utils/getDatabaseConfig";
-import {
-  PostgresConfig,
+import { getDatabaseConfigFromEnv } from "@shikor/core/config/helpers/env";
+import type {
   MockConfig,
+  PostgresConfig,
   MongoConfig,
   SqliteConfig,
 } from "@shikor/core/database/types";
-
-class AppError extends Error {
-  constructor(
-    public message: string,
-    public statusCode: number = 500,
-    public details?: Record<string, unknown>
-  ) {
-    super(message);
-    Object.setPrototypeOf(this, AppError.prototype);
-  }
-}
+import "../../../packages/core/bootstrap";
 
 const app = express();
 
-// ======================
-// Middleware
-// ======================
 app.use(helmet());
 app.disable("x-powered-by");
 app.use(express.json({ limit: "10mb" }));
 app.use(httpLogger);
 
-// Database check middleware (fixed)
-app.use((req: Request, res: Response, next: NextFunction) => {
+app.use(((req, res, next) => {
   if (!req.app.locals.db) {
     req.log.error("Database connection not initialized");
-    res.status(503).json({
+    return res.status(503).json({
       error: "Service Unavailable",
       message: "Database not initialized",
       status: "degraded",
     });
-    return;
   }
-  next();
-});
 
-// ======================
-// Routes
-// ======================
+  return next();
+}) as express.RequestHandler);
+
 app.get("/health", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const db = req.app.locals.db;
@@ -103,98 +92,37 @@ app.get("/debug", (req: Request, res: Response) => {
   });
 });
 
-app.get("/users", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { limit = 100, offset = 0 } = req.query;
-    const safeLimit = Math.min(Number(limit), 1000);
-    const safeOffset = Math.max(Number(offset), 0);
-
-    const users = await req.app.locals.db.read(
-      "users",
-      {},
-      {
-        limit: safeLimit,
-        offset: safeOffset,
-      }
-    );
-
-    res.json({
-      data: users,
-      pagination: {
-        limit: safeLimit,
-        offset: safeOffset,
-        returned: users.length,
-      },
-    });
-  } catch (error) {
-    req.log.error(error, "Failed to fetch users");
-    next(
-      new AppError("Failed to fetch users", 500, {
-        query: req.query,
-        ...(env.isDev && {
-          stack: error instanceof Error ? error.stack : undefined,
-        }),
-      })
-    );
-  }
-});
-
-app.post("/users", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    if (!req.body || Object.keys(req.body).length === 0) {
-      throw new AppError("Empty request body", 400);
-    }
-
-    const newUser = await req.app.locals.db.create("users", req.body);
-    res.status(201).json(newUser);
-  } catch (error) {
-    req.log.error(error, "Failed to create user");
-    next(
-      new AppError("Failed to create user", 400, {
-        ...(env.isDev && {
-          details: error instanceof Error ? error.message : undefined,
-        }),
-      })
-    );
-  }
-});
-
-// ======================
-// Error Handling
-// ======================
 app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+  let statusCode = 500;
+  let message = "Internal Server Error";
+  let stack: string | undefined;
+  let details: any;
+
   if (err instanceof AppError) {
-    req.log.error(
-      {
-        statusCode: err.statusCode,
-        details: err.details,
-        ...(env.isDev && { stack: err.stack }),
-      },
-      err.message
-    );
+    statusCode = err.statusCode;
+    message = err.message;
+    details = err.details;
+    stack = err.stack;
   } else if (err instanceof Error) {
-    req.log.error({ ...(env.isDev && { stack: err.stack }) }, err.message);
-  } else {
-    req.log.error("Unknown error type: %o", err);
+    message = err.message;
+    stack = err.stack;
+  } else if (typeof err === "string") {
+    message = err;
   }
 
-  const statusCode = err instanceof AppError ? err.statusCode : 500;
-  const response = {
-    error: err instanceof Error ? err.message : "Internal Server Error",
+  req.log.error({ err }, message);
+
+  res.status(statusCode).json({
+    error: message,
     requestId: req.id,
     timestamp: new Date().toISOString(),
     ...(env.isDev && {
-      details: err instanceof AppError ? err.details : undefined,
-      stack: err instanceof Error ? err.stack : undefined,
+      stack,
+      details,
     }),
-  };
-
-  res.status(statusCode).json(response);
+  });
 });
 
-// ======================
-// Server Initialization
-// ======================
 const PORT = env.PORT || 3000;
 
 async function initializeDatabase() {
@@ -208,10 +136,7 @@ async function initializeDatabase() {
       registerCustomEngines();
       dbLogger.info("Custom database engines registered");
     } catch (error) {
-      dbLogger.error(
-        error instanceof Error ? error : new Error(String(error)),
-        "Failed to register custom database engines"
-      );
+      dbLogger.error(error, "Failed to register custom database engines");
     }
   }
 
@@ -220,46 +145,43 @@ async function initializeDatabase() {
     | "postgres"
     | "mongo"
     | "sqlite";
-  const config = getDatabaseConfig(engine);
+
+  const db = await resolveDatabaseStrategy(engine);
+  return db;
+}
+
+async function resolveDatabaseStrategy(
+  engine: "mock" | "postgres" | "mongo" | "sqlite"
+) {
+  const config = getDatabaseConfigFromEnv(engine);
+  const validation = Config.validate({ [engine]: config });
+  if (!validation.success) {
+    dbLogger.error(validation.errors, `Invalid config for engine '${engine}'`);
+    process.exit(1);
+  }
 
   dbLogger.info({ engine }, "Initializing database connection");
 
-  try {
-    let db;
-    switch (engine) {
-      case "mock":
-        db = await DatabaseStrategyFactory.create("mock", config as MockConfig);
-        break;
-      case "postgres":
-        db = await DatabaseStrategyFactory.create(
-          "postgres",
-          config as PostgresConfig
-        );
-        break;
-      case "mongo":
-        db = await DatabaseStrategyFactory.create(
-          "mongo",
-          config as MongoConfig
-        );
-        break;
-      case "sqlite":
-        db = await DatabaseStrategyFactory.create(
-          "sqlite",
-          config as SqliteConfig
-        );
-        break;
-      default:
-        throw new Error(`Unsupported database engine: ${engine}`);
-    }
-
-    dbLogger.info({ engine }, "Database connection established");
-    return db;
-  } catch (error) {
-    dbLogger.error(
-      error instanceof Error ? error : new Error(String(error)),
-      "Database initialization failed"
-    );
-    throw error;
+  switch (engine) {
+    case "mock":
+      return await DatabaseStrategyFactory.create("mock", config as MockConfig);
+    case "postgres":
+      return await DatabaseStrategyFactory.create(
+        "postgres",
+        config as PostgresConfig
+      );
+    case "mongo":
+      return await DatabaseStrategyFactory.create(
+        "mongo",
+        config as MongoConfig
+      );
+    case "sqlite":
+      return await DatabaseStrategyFactory.create(
+        "sqlite",
+        config as SqliteConfig
+      );
+    default:
+      throw new Error(`Unsupported database engine: ${engine}`);
   }
 }
 
@@ -273,8 +195,7 @@ if (cluster.isPrimary && env.isProd) {
   }
 
   cluster.on("exit", (worker, code, signal) => {
-    const message = `Worker ${worker.process.pid} died (${signal || code})`;
-    logger.warn(message);
+    logger.warn(`Worker ${worker.process.pid} died (${signal || code})`);
     logger.info("Restarting worker...");
     cluster.fork();
   });
@@ -299,49 +220,30 @@ if (cluster.isPrimary && env.isProd) {
 
       const shutdown = async () => {
         logger.info("Shutdown signal received");
+        await db.disconnect();
+        logger.info("Database connection closed");
+        server.close(() => {
+          logger.info("HTTP server closed");
+          process.exit(0);
+        });
 
-        try {
-          await db.disconnect();
-          logger.info("Database connection closed");
-
-          server.close(() => {
-            logger.info("HTTP server closed");
-            process.exit(0);
-          });
-
-          setTimeout(() => {
-            logger.warn("Forcing shutdown");
-            process.exit(1);
-          }, 5000);
-        } catch (error) {
-          logger.error(
-            error instanceof Error ? error : new Error(String(error)),
-            "Error during shutdown"
-          );
+        setTimeout(() => {
+          logger.warn("Forcing shutdown");
           process.exit(1);
-        }
+        }, 5000);
       };
 
       process.on("SIGTERM", shutdown);
       process.on("SIGINT", shutdown);
       process.on("unhandledRejection", (reason) => {
-        logger.error(
-          reason instanceof Error ? reason : new Error(String(reason)),
-          "Unhandled Rejection"
-        );
+        logger.error(reason, "Unhandled Rejection");
       });
       process.on("uncaughtException", (error) => {
-        logger.error(
-          error instanceof Error ? error : new Error(String(error)),
-          "Uncaught Exception"
-        );
+        logger.error(error, "Uncaught Exception");
         shutdown();
       });
     } catch (err) {
-      logger.error(
-        err instanceof Error ? err : new Error(String(err)),
-        "Failed to start server"
-      );
+      logger.error(err, "Failed to start server");
       process.exit(1);
     }
   })();
@@ -363,10 +265,18 @@ async function checkDiskSpace(): Promise<{
       totalGB: parseFloat(totalGB.toFixed(2)),
     };
   } catch (err) {
-    logger.error(
-      err instanceof Error ? err : new Error(String(err)),
-      "Disk check failed"
-    );
+    logger.error(err, "Disk check failed");
     return { ok: false, freeGB: 0, totalGB: 0 };
+  }
+}
+
+class AppError extends Error {
+  constructor(
+    public message: string,
+    public statusCode: number = 500,
+    public details?: Record<string, unknown>
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, AppError.prototype);
   }
 }
