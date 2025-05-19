@@ -13,6 +13,12 @@ import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
 import type { QueryOptions } from "../../types/QueryOptions";
 import type { ConnectionStatus } from "../../IDatabaseStrategy";
 import { ZodObject, ZodRawShape } from "zod"; // 👈 add this to your imports
+import { Config } from "../../../config/config";
+import { MongoConfigSchema } from "./config";
+
+Config.registerModuleSchema("mongo", MongoConfigSchema);
+
+// Your MongoStrategy implementation below...
 
 export type MongoConfig = {
   connectionString: string;

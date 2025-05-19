@@ -4,6 +4,12 @@ import type { Logger } from "pino";
 import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
 import type { QueryOptions } from "../../types/QueryOptions";
 import type { ConnectionStatus } from "../../IDatabaseStrategy";
+import { Config } from "../../../config/config";
+import { MockConfigSchema } from "./config";
+
+Config.registerModuleSchema("mock", MockConfigSchema);
+
+// Your MockDatabaseStrategy implementation below...
 
 export class MockDatabaseStrategy extends BaseDatabaseStrategy {
   private db: Record<string, any[]> = {};
