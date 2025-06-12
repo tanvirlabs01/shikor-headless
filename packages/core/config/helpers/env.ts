@@ -1,10 +1,14 @@
 import { Config } from "../config";
+import type { ModuleConfigSchema } from "../types";
 
-export function getDatabaseConfigFromEnv(
+export function loadResolvedConfigForModule(
   engine: "postgres" | "mongo" | "sqlite" | "mock"
-) {
-  const schema = Config.getModuleSchema(engine);
-  if (!schema) throw new Error(`Schema not found for ${engine}`);
+): Record<string, any> {
+  const schema: ModuleConfigSchema | undefined = Config.getModuleSchema(engine);
+
+  if (!schema) {
+    throw new Error(`Schema not found for module "${engine}"`);
+  }
 
   const config: Record<string, any> = {};
 
@@ -36,5 +40,3 @@ export function getDatabaseConfigFromEnv(
 
   return config;
 }
-//const config = getDatabaseConfigFromEnv("postgres");
-//const db = await DatabaseStrategyFactory.create("postgres", config);

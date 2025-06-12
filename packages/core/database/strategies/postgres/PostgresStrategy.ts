@@ -1,19 +1,20 @@
-import { Pool, QueryResult } from "pg";
+// packages/core/database/strategies/postgres/PostgresStrategy.ts
 import { EventEmitter } from "events";
 import type { Logger } from "pino";
+import type { Knex } from "knex";
 import { z, ZodObject, ZodRawShape } from "zod";
+import { createKnexInstance } from "../../knex/createKnexInstance";
 import { BaseDatabaseStrategy } from "../BaseDatabaseStrategy";
+import { Config } from "../../../config/config";
 import type { QueryOptions } from "../../types/QueryOptions";
 import type { ConnectionStatus } from "../../IDatabaseStrategy";
-import { Config } from "../../../config/config";
-import { PostgresConfigSchema } from "./config";
+import { PostgresConfigSchema } from "./PostgresConfig";
+import { PostgresConfig } from "../../types";
 
 Config.registerModuleSchema("postgres", PostgresConfigSchema);
 
-// Your PostgresStrategy implementation below...
-
 export class PostgresStrategy extends BaseDatabaseStrategy {
-  private pool: Pool;
+  private db!: Knex;
   private emitter = new EventEmitter();
   private schemas: Map<string, ZodObject<ZodRawShape>> = new Map();
   private retryCount = 0;
@@ -22,37 +23,16 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
   public ready: Promise<void> = Promise.resolve();
 
   constructor(
-    private config: {
-      host: string;
-      port: number;
-      user: string;
-      password: string;
-      database: string;
-      ssl?: boolean;
-      poolSize?: number;
-      idleTimeout?: number;
-      connectionTimeout?: number;
-      maxRetries?: number;
-    },
+    private config: PostgresConfig,
     private logger?: Logger
   ) {
     super();
-    this.pool = new Pool({
-      host: config.host,
-      port: config.port,
-      user: config.user,
-      password: config.password,
-      database: config.database,
-      ssl: config.ssl,
-      max: config.poolSize || 10,
-      idleTimeoutMillis: config.idleTimeout || 30000,
-      connectionTimeoutMillis: config.connectionTimeout || 5000,
-    });
 
-    this.pool.on("error", (err) => {
-      this.logger?.error({ err, module: "database" }, "PostgreSQL pool error");
-      this.status = "error";
-      this.emitter.emit("disconnect");
+    const connectionString = config.connectionString!;
+    this.db = createKnexInstance({
+      client: "pg",
+      connection: connectionString,
+      debug: process.env.NODE_ENV === "development",
     });
   }
 
@@ -68,20 +48,22 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
   private async connectWithRetry(): Promise<void> {
     try {
       this.status = "connecting";
-      const client = await this.pool.connect();
-      await client.query("SELECT 1");
-      client.release();
+      await this.db.raw("SELECT 1");
       this.status = "ready";
       this.retryCount = 0;
+      this.logger?.info(
+        { module: "database" },
+        "PostgreSQL connected via Knex"
+      );
       this.emitter.emit("connect");
-      this.logger?.info({ module: "database" }, "PostgreSQL connected");
     } catch (error) {
-      if (this.retryCount < (this.config.maxRetries ?? 3)) {
+      if (this.retryCount < 3) {
         this.retryCount++;
         const delay = Math.pow(2, this.retryCount) * 100;
         await new Promise((res) => setTimeout(res, delay));
         return this.connectWithRetry();
       }
+
       this.status = "error";
       this.logger?.error(
         { err: error, module: "database" },
@@ -92,106 +74,84 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
   }
 
   public async disconnect(): Promise<void> {
-    await this.pool.end();
+    await this.db.destroy();
     this.status = "error";
     this.emitter.emit("disconnect");
     this.logger?.info({ module: "database" }, "PostgreSQL disconnected");
   }
 
-  public async create<T>(table: string, data: Partial<T>): Promise<T> {
+  public async create<T extends Record<string, unknown>>(
+    table: string,
+    data: Partial<T>
+  ): Promise<T> {
     this.validateSchema(table, data);
 
-    const keys = Object.keys(data);
-    const values = Object.values(data);
-    const placeholders = keys.map((_, i) => `$${i + 1}`).join(", ");
-    const sql = `
-      INSERT INTO ${this.safeId(table)} (${keys.map(this.safeId).join(", ")})
-      VALUES (${placeholders})
-      RETURNING *`;
-    const result = await this.query<T>(sql, values);
-    return result.rows[0];
+    const result = await (this.db(table)
+      .insert(data)
+      .returning("*") as unknown as Promise<T[]>);
+    return result[0];
   }
 
-  public async read<T>(
+  public async read<T extends Record<string, unknown>>(
     table: string,
-    queryObj: Record<string, any> = {},
+    queryObj: Partial<T> = {},
     options: QueryOptions = {}
   ): Promise<T[]> {
     this.validateQueryOptions(options);
 
-    const keys = Object.keys(queryObj);
-    const values = Object.values(queryObj);
-
-    let sql = `SELECT * FROM ${this.safeId(table)}`;
-    if (keys.length) {
-      sql += ` WHERE ${keys
-        .map((k, i) => `${this.safeId(k)} = $${i + 1}`)
-        .join(" AND ")}`;
-    }
+    let query = this.db<T>(table).where(queryObj);
 
     if (options.sort) {
-      sql += ` ORDER BY ${this.safeId(options.sort.field)} ${
-        options.sort.order.toUpperCase() === "DESC" ? "DESC" : "ASC"
-      }`;
+      query = query.orderBy(
+        options.sort.field as keyof T,
+        options.sort.order ?? "asc"
+      );
     }
 
     if (typeof options.limit === "number") {
-      values.push(options.limit);
-      sql += ` LIMIT $${values.length}`;
+      query = query.limit(options.limit);
     }
 
     if (typeof options.offset === "number") {
-      values.push(options.offset);
-      sql += ` OFFSET $${values.length}`;
+      query = query.offset(options.offset);
     }
 
-    const result = await this.query<T>(sql, values);
-    return result.rows;
+    // Final cast to satisfy TypeScript without breaking safety
+    return (await query) as T[];
   }
 
-  public async update<T>(
+  public async update<T extends Record<string, unknown>>(
     table: string,
-    queryObj: Record<string, any>,
+    queryObj: Partial<T>,
     data: Partial<T>
   ): Promise<T> {
     this.validateSchema(table, data, true);
 
-    const dataKeys = Object.keys(data);
-    const queryKeys = Object.keys(queryObj);
-    const values = [...Object.values(data), ...Object.values(queryObj)];
+    // Cast only the `.update()` input to an acceptable type
+    const result = await (this.db<T>(table)
+      .where(queryObj)
+      .update(data as any) // 👈 safely isolated
+      .returning("*") as Promise<T[]>);
 
-    const setClause = dataKeys
-      .map((k, i) => `${this.safeId(k)} = $${i + 1}`)
-      .join(", ");
-    const whereClause = queryKeys
-      .map((k, i) => `${this.safeId(k)} = $${i + dataKeys.length + 1}`)
-      .join(" AND ");
-
-    const sql = `UPDATE ${this.safeId(table)} SET ${setClause} WHERE ${whereClause} RETURNING *`;
-    const result = await this.query<T>(sql, values);
-    return result.rows[0];
+    return result[0];
   }
 
-  public async delete<T = any>(
+  public async delete<T extends Record<string, unknown>>(
     table: string,
-    queryObj: Record<string, any>
+    queryObj: Partial<T>
   ): Promise<T> {
-    const keys = Object.keys(queryObj);
-    const values = Object.values(queryObj);
-    const whereClause = keys
-      .map((k, i) => `${this.safeId(k)} = $${i + 1}`)
-      .join(" AND ");
+    const result = await this.db<T>(table)
+      .where(queryObj)
+      .delete()
+      .returning("*");
 
-    const sql = `DELETE FROM ${this.safeId(table)} WHERE ${whereClause} RETURNING *`;
-    const result = await this.query<T>(sql, values);
-    return result.rows[0];
+    return result[0] as T;
   }
 
   public async healthCheck(): Promise<{ ok: boolean; latency: number }> {
     const start = Date.now();
     try {
-      const result = await this.pool.query("SELECT 1");
-      if (result.rowCount !== 1) throw new Error("Bad ping result");
+      await this.db.raw("SELECT 1");
       return { ok: true, latency: Date.now() - start };
     } catch {
       this.status = "error";
@@ -203,29 +163,12 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
     this.emitter.on(event, listener);
   }
 
-  private async query<T = any>(
-    sql: string,
-    params?: any[]
-  ): Promise<QueryResult<T>> {
-    const start = Date.now();
-    try {
-      const result = await this.pool.query(sql, params);
-      this.logger?.debug(
-        { sql, params, duration: Date.now() - start, module: "database" },
-        "Query executed"
-      );
-      return result;
-    } catch (error) {
-      this.logger?.error(
-        { sql, params, err: error, module: "database" },
-        "Query failed"
-      );
-      throw error;
-    }
-  }
-
-  private safeId(id: string): string {
-    return `"${id.replace(/"/g, '""')}"`;
+  private setupErrorHandling() {
+    this.db.on("query-error", (err) => {
+      this.status = "error";
+      this.logger?.error({ err, module: "database" }, "Knex query error");
+      this.emitter.emit("disconnect");
+    });
   }
 
   private validateSchema(table: string, data: any, partial = false) {

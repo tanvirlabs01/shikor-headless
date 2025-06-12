@@ -41,6 +41,8 @@ export interface PostgresConfig extends BaseDatabaseConfig {
   idleTimeout?: number;
   /** Query timeout in milliseconds */
   queryTimeout?: number;
+  /**Connection string */
+  connectionString?: string;
 }
 
 /** MongoDB configuration */
