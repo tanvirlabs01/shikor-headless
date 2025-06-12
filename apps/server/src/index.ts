@@ -12,7 +12,7 @@ import "@shikor/core/database/strategies/mongo";
 import "@shikor/core/database/strategies/sqlite";
 import "@shikor/core/database/strategies/mock";
 import { DatabaseStrategyFactory } from "@shikor/core/database";
-import { getDatabaseConfigFromEnv } from "@shikor/core/config/helpers/env";
+import { loadResolvedConfigForModule } from "@shikor/core/config/helpers/env";
 import type {
   MockConfig,
   PostgresConfig,
@@ -153,7 +153,7 @@ async function initializeDatabase() {
 async function resolveDatabaseStrategy(
   engine: "mock" | "postgres" | "mongo" | "sqlite"
 ) {
-  const config = getDatabaseConfigFromEnv(engine);
+  const config = loadResolvedConfigForModule(engine);
   const validation = Config.validate({ [engine]: config });
   if (!validation.success) {
     dbLogger.error(validation.errors, `Invalid config for engine '${engine}'`);
