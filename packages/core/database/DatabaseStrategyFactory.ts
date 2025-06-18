@@ -19,6 +19,7 @@ import { Config } from "../config/config";
 import { IDatabaseStrategy } from "./IDatabaseStrategy";
 import { loadEnvConfigValue } from "../utils/envLoader";
 import { PostgresConfigSchema } from "../database/strategies/postgres/PostgresConfig";
+import { AppError, ErrorType } from "../errors/AppError";
 
 export class DatabaseStrategyFactory {
   private static customStrategies = new Map<
@@ -27,6 +28,7 @@ export class DatabaseStrategyFactory {
   >();
   private static baseLogger?: Logger;
   private static dbLogger?: Logger;
+  private static currentStrategy?: IDatabaseStrategy;
 
   private static builtinStrategies: StrategyFactoryMap = {
     mock: (config, logger) => new MockDatabaseStrategy(config, logger),
@@ -34,6 +36,7 @@ export class DatabaseStrategyFactory {
     mongo: (config, logger) => new MongoStrategy(config, logger),
     sqlite: (config, logger) => new SqliteStrategy(config, logger),
   };
+  AppError;
 
   static setLogger(logger: Logger): void {
     this.baseLogger = logger;
@@ -98,6 +101,7 @@ export class DatabaseStrategyFactory {
       customConfig.configValidator?.(config);
       const instance = new customConfig.strategyClass(config, this.dbLogger);
       await instance.ready;
+      this.currentStrategy = instance;
       this.dbLogger?.info({ engine }, `Initialized custom database engine`);
       return instance;
     } catch (error) {
@@ -132,6 +136,7 @@ export class DatabaseStrategyFactory {
     const factory = this.builtinStrategies[engine];
     const instance = factory(config, this.dbLogger);
     await instance.ready;
+    this.currentStrategy = instance;
     this.dbLogger?.info({ engine }, `Initialized ${engine} database`);
     return instance;
   }
@@ -174,5 +179,17 @@ export class DatabaseStrategyFactory {
       ...(Object.keys(this.builtinStrategies) as BuiltinEngine[]),
       ...Array.from(this.customStrategies.keys()),
     ];
+  }
+
+  static getCurrentStrategy(): IDatabaseStrategy | undefined {
+    return this.currentStrategy;
+  }
+  static getRequiredStrategy(): IDatabaseStrategy {
+    if (!this.currentStrategy) {
+      throw AppError.databaseError(
+        "No database strategy is currently initialized"
+      );
+    }
+    return this.currentStrategy;
   }
 }

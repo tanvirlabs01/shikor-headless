@@ -10,7 +10,7 @@ import type { QueryOptions } from "../../types/QueryOptions";
 import type { ConnectionStatus } from "../../IDatabaseStrategy";
 import { PostgresConfigSchema } from "./PostgresConfig";
 import { PostgresConfig } from "../../types";
-
+import { QueryLogger } from "@shikor/core/database/utils/QueryLogger";
 Config.registerModuleSchema("postgres", PostgresConfigSchema);
 
 export class PostgresStrategy extends BaseDatabaseStrategy {
@@ -84,11 +84,21 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
     table: string,
     data: Partial<T>
   ): Promise<T> {
-    this.validateSchema(table, data);
+    this.validateSchema?.(table, data);
+
+    const dbData: Record<string, unknown> = { ...data };
+
+    // 🔥 Hardcoded: JSON.stringify "fields"
+    if (dbData.fields && typeof dbData.fields === "object") {
+      dbData.fields = JSON.stringify(dbData.fields);
+    }
+
+    QueryLogger.logQuery("insert", table, dbData);
 
     const result = await (this.db(table)
-      .insert(data)
+      .insert(dbData)
       .returning("*") as unknown as Promise<T[]>);
+
     return result[0];
   }
 
@@ -182,5 +192,8 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
     if (!result.success) {
       throw new Error(`Schema validation failed: ${result.error.message}`);
     }
+  }
+  public getDb(): Knex {
+    return this.db;
   }
 }
