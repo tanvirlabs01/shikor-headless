@@ -178,4 +178,7 @@ export class MongoStrategy extends BaseDatabaseStrategy {
       );
     }
   }
+  public getDb(): Db {
+    return this.db;
+  }
 }

@@ -6,19 +6,16 @@ import helmet from "helmet";
 import { logger, dbLogger } from "@shikor/core/src/telemetry/logger";
 import { httpLogger } from "@shikor/core/src/utils/httpLogger";
 import { env } from "@shikor/core/src/config";
-import { Config } from "@shikor/core/config/config";
 import "@shikor/core/database/strategies/postgres";
 import "@shikor/core/database/strategies/mongo";
 import "@shikor/core/database/strategies/sqlite";
 import "@shikor/core/database/strategies/mock";
 import { DatabaseStrategyFactory } from "@shikor/core/database";
-import { loadResolvedConfigForModule } from "@shikor/core/config/helpers/env";
-import type {
-  MockConfig,
-  PostgresConfig,
-  MongoConfig,
-  SqliteConfig,
-} from "@shikor/core/database/types";
+import { resolveDatabaseStrategy } from "@shikor/core/database/utils/resolveStrategy";
+import commandRouter from "@shikor/core/routes/commandRouter";
+import authRouter from "@shikor/core/routes/authRouter";
+import { AppError, ErrorType } from "@shikor/core/errors/AppError";
+
 import "../../../packages/core/bootstrap";
 
 const app = express();
@@ -27,6 +24,9 @@ app.use(helmet());
 app.disable("x-powered-by");
 app.use(express.json({ limit: "10mb" }));
 app.use(httpLogger);
+
+app.use("/api", commandRouter); // ✅ attaches to /api/command
+app.use("/api/auth", authRouter); // 🔐 auth-related routes
 
 app.use(((req, res, next) => {
   if (!req.app.locals.db) {
@@ -95,12 +95,14 @@ app.get("/debug", (req: Request, res: Response) => {
 app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
   let statusCode = 500;
   let message = "Internal Server Error";
+  let errorCode = ErrorType.UNKNOWN;
   let stack: string | undefined;
   let details: any;
 
   if (err instanceof AppError) {
     statusCode = err.statusCode;
     message = err.message;
+    errorCode = err.code;
     details = err.details;
     stack = err.stack;
   } else if (err instanceof Error) {
@@ -114,6 +116,7 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
 
   res.status(statusCode).json({
     error: message,
+    code: errorCode,
     requestId: req.id,
     timestamp: new Date().toISOString(),
     ...(env.isDev && {
@@ -148,41 +151,6 @@ async function initializeDatabase() {
 
   const db = await resolveDatabaseStrategy(engine);
   return db;
-}
-
-async function resolveDatabaseStrategy(
-  engine: "mock" | "postgres" | "mongo" | "sqlite"
-) {
-  const config = loadResolvedConfigForModule(engine);
-  const validation = Config.validate({ [engine]: config });
-  if (!validation.success) {
-    dbLogger.error(validation.errors, `Invalid config for engine '${engine}'`);
-    process.exit(1);
-  }
-
-  dbLogger.info({ engine }, "Initializing database connection");
-
-  switch (engine) {
-    case "mock":
-      return await DatabaseStrategyFactory.create("mock", config as MockConfig);
-    case "postgres":
-      return await DatabaseStrategyFactory.create(
-        "postgres",
-        config as PostgresConfig
-      );
-    case "mongo":
-      return await DatabaseStrategyFactory.create(
-        "mongo",
-        config as MongoConfig
-      );
-    case "sqlite":
-      return await DatabaseStrategyFactory.create(
-        "sqlite",
-        config as SqliteConfig
-      );
-    default:
-      throw new Error(`Unsupported database engine: ${engine}`);
-  }
 }
 
 if (cluster.isPrimary && env.isProd) {
@@ -267,16 +235,5 @@ async function checkDiskSpace(): Promise<{
   } catch (err) {
     logger.error(err, "Disk check failed");
     return { ok: false, freeGB: 0, totalGB: 0 };
-  }
-}
-
-class AppError extends Error {
-  constructor(
-    public message: string,
-    public statusCode: number = 500,
-    public details?: Record<string, unknown>
-  ) {
-    super(message);
-    Object.setPrototypeOf(this, AppError.prototype);
   }
 }

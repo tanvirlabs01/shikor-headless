@@ -10,6 +10,7 @@ import type { ConnectionStatus } from "../../IDatabaseStrategy";
 import type { QueryOptions } from "../../types/QueryOptions";
 import { Config } from "../../../config/config";
 import { SqliteConfigSchema } from "./config";
+import { Db } from "mongodb";
 
 Config.registerModuleSchema("sqlite", SqliteConfigSchema);
 
@@ -177,5 +178,8 @@ export class SqliteStrategy extends BaseDatabaseStrategy {
     if (!result.success) {
       throw new Error(`Schema validation failed: ${result.error.message}`);
     }
+  }
+  public getDb(): Db {
+    return this.db;
   }
 }
