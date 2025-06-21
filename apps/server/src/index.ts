@@ -15,6 +15,7 @@ import { resolveDatabaseStrategy } from "@shikor/core/database/utils/resolveStra
 import commandRouter from "@shikor/core/routes/commandRouter";
 import authRouter from "@shikor/core/routes/authRouter";
 import { AppError, ErrorType } from "@shikor/core/errors/AppError";
+import { errorHandler } from "@shikor/core/middleware/errorHandler";
 
 import "../../../packages/core/bootstrap";
 
@@ -92,40 +93,7 @@ app.get("/debug", (req: Request, res: Response) => {
   });
 });
 
-app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
-  let statusCode = 500;
-  let message = "Internal Server Error";
-  let errorCode = ErrorType.UNKNOWN;
-  let stack: string | undefined;
-  let details: any;
-
-  if (err instanceof AppError) {
-    statusCode = err.statusCode;
-    message = err.message;
-    errorCode = err.code;
-    details = err.details;
-    stack = err.stack;
-  } else if (err instanceof Error) {
-    message = err.message;
-    stack = err.stack;
-  } else if (typeof err === "string") {
-    message = err;
-  }
-
-  req.log.error({ err }, message);
-
-  res.status(statusCode).json({
-    error: message,
-    code: errorCode,
-    requestId: req.id,
-    timestamp: new Date().toISOString(),
-    ...(env.isDev && {
-      stack,
-      details,
-    }),
-  });
-});
-
+app.use(errorHandler); // ⬅️ at the very end
 const PORT = env.PORT || 3000;
 
 async function initializeDatabase() {

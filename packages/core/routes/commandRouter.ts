@@ -12,10 +12,11 @@ import { AppError } from "../errors/AppError";
 import { logger } from "../src/telemetry/logger";
 import { authenticateToken } from "../middleware/authMiddleware";
 import { authorizeCollectionActionMiddleware } from "../middleware/authorizeCollectionActionMiddleware";
+import { collectionPermissionRegistry } from "../commands/collection_permissions/CollectionPermissionCommandRegistry";
 const router = express.Router();
 
 const commandSchema = z.object({
-  operation: z.enum(["create", "update", "delete"]),
+  operation: z.enum(["create", "update", "delete", "reset"]),
   collection: z.string().min(1),
   data: z.record(z.any()).optional(),
   filter: z.record(z.any()).optional(),
@@ -28,6 +29,18 @@ const commandFactory = (
   data?: Record<string, any>,
   filter?: Record<string, any>
 ): ICommand => {
+  if (collection === "collection_permissions") {
+    const factory =
+      collectionPermissionRegistry[
+        operation as keyof typeof collectionPermissionRegistry
+      ];
+    if (!factory) {
+      throw AppError.validationError(
+        `Unsupported operation '${operation}' for collection_permissions`
+      );
+    }
+    return factory(collection, data!);
+  }
   switch (operation) {
     case "create":
       return new CreateCommand(dbStrategy, collection, data!);
