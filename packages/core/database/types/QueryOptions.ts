@@ -1,9 +1,10 @@
-// packages/core/database/types/QueryOptions.ts
-export type QueryOptions = {
-  limit?: number;
-  offset?: number;
+export interface QueryOptions {
   sort?: {
     field: string;
-    order: "asc" | "desc";
+    order?: "asc" | "desc";
   };
-};
+  limit?: number;
+  offset?: number;
+
+  or?: { field: string; value: any }[]; // ✅ Add this
+}

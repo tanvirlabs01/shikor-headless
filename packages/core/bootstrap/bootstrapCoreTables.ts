@@ -45,6 +45,9 @@ export async function bootstrapCoreTables(adminUser?: AdminUserInput) {
           table.string("password").notNullable();
           table.string("email").notNullable();
           table.string("role").notNullable();
+          table.string("refresh_token").nullable();
+          table.timestamp("last_login_at").nullable(); // ✅ Add this
+          table.timestamps(true, true);
         });
         logger.info("✅ Table users created.");
       }
@@ -54,7 +57,7 @@ export async function bootstrapCoreTables(adminUser?: AdminUserInput) {
           table.increments("id").primary();
           table.string("collection_name").notNullable();
           table.string("operation").notNullable();
-          table.json("allowed_roles").notNullable();
+          table.jsonb("allowed_roles").notNullable();
         });
         logger.info("✅ Table collection_permissions created.");
       }
@@ -182,6 +185,11 @@ async function ensureDefaultPermissions(db: IDatabaseStrategy, engine: string) {
     {
       collection_name: "collection_permissions",
       operation: "delete",
+      allowed_roles: ["admin"],
+    },
+    {
+      collection_name: "collection_permissions",
+      operation: "reset",
       allowed_roles: ["admin"],
     },
   ];

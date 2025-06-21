@@ -1,4 +1,3 @@
-// packages/core/database/strategies/postgres/PostgresStrategy.ts
 import { EventEmitter } from "events";
 import type { Logger } from "pino";
 import type { Knex } from "knex";
@@ -11,6 +10,7 @@ import type { ConnectionStatus } from "../../IDatabaseStrategy";
 import { PostgresConfigSchema } from "./PostgresConfig";
 import { PostgresConfig } from "../../types";
 import { QueryLogger } from "@shikor/core/database/utils/QueryLogger";
+
 Config.registerModuleSchema("postgres", PostgresConfigSchema);
 
 export class PostgresStrategy extends BaseDatabaseStrategy {
@@ -88,7 +88,6 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
 
     const dbData: Record<string, unknown> = { ...data };
 
-    // 🔥 Hardcoded: JSON.stringify "fields"
     if (dbData.fields && typeof dbData.fields === "object") {
       dbData.fields = JSON.stringify(dbData.fields);
     }
@@ -109,7 +108,17 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
   ): Promise<T[]> {
     this.validateQueryOptions(options);
 
-    let query = this.db<T>(table).where(queryObj);
+    let query;
+
+    if (options.or && options.or.length > 0) {
+      query = this.db<T>(table).where((builder) => {
+        options.or!.forEach(({ field, value }) => {
+          builder.orWhere(field as string, value);
+        });
+      });
+    } else {
+      query = this.db<T>(table).where(queryObj);
+    }
 
     if (options.sort) {
       query = query.orderBy(
@@ -126,7 +135,6 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
       query = query.offset(options.offset);
     }
 
-    // Final cast to satisfy TypeScript without breaking safety
     return (await query) as T[];
   }
 
@@ -137,11 +145,27 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
   ): Promise<T> {
     this.validateSchema(table, data, true);
 
-    // Cast only the `.update()` input to an acceptable type
+    // 🚨 Defensive: Check for undefined or missing query keys
+    if (!queryObj || Object.keys(queryObj).length === 0) {
+      throw new Error(`Update failed: empty or missing queryObj`);
+    }
+
+    for (const [key, value] of Object.entries(queryObj)) {
+      if (value === undefined) {
+        throw new Error(`Invalid update: query field "${key}" is undefined`);
+      }
+    }
+
+    this.logger?.warn({ table, queryObj, data }, "[DB] update() input");
+
     const result = await (this.db<T>(table)
       .where(queryObj)
-      .update(data as any) // 👈 safely isolated
+      .update(data as any)
       .returning("*") as Promise<T[]>);
+
+    if (result.length === 0) {
+      throw new Error(`Update failed: no matching record found in '${table}'`);
+    }
 
     return result[0];
   }
@@ -193,6 +217,7 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
       throw new Error(`Schema validation failed: ${result.error.message}`);
     }
   }
+
   public getDb(): Knex {
     return this.db;
   }

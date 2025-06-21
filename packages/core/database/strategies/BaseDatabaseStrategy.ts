@@ -26,18 +26,21 @@ export abstract class BaseDatabaseStrategy implements IDatabaseStrategy {
   protected validateQueryOptions(options?: QueryOptions): void {
     if (!options) return;
 
-    if (options.limit && (options.limit < 0 || options.limit > 1000)) {
+    if (options.limit != null && (options.limit < 0 || options.limit > 1000)) {
       throw new Error("Invalid limit: must be between 0 and 1000");
     }
 
-    if (options.offset && options.offset < 0) {
+    if (options.offset != null && options.offset < 0) {
       throw new Error("Invalid offset: must be >= 0");
     }
 
     if (options.sort) {
       const { field, order } = options.sort;
-      if (!field || !["asc", "desc"].includes(order)) {
-        throw new Error("Invalid sort options");
+      if (!field) {
+        throw new Error("Invalid sort options: missing field");
+      }
+      if (order && !["asc", "desc"].includes(order)) {
+        throw new Error("Invalid sort options: order must be 'asc' or 'desc'");
       }
     }
   }

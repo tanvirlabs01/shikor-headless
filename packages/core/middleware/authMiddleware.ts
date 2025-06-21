@@ -1,30 +1,34 @@
-// packages/core/middleware/authMiddleware.ts
-
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { AppError } from "../errors/AppError";
-import { logger } from "../src/telemetry/logger";
+import { User } from "../types/User"; // ✅ Import shared User type
 
-const SECRET_KEY = process.env.SECRET_KEY || "changeme";
+// Extend Express Request to include our strict User type
+export interface AuthenticatedRequest extends Request {
+  user?: User;
+}
 
+const JWT_SECRET = process.env.SECRET_KEY || "shikor_access";
 export const authenticateToken = (
-  req: Request,
+  req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
 ) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader?.split(" ")[1];
+  const authHeader = req.headers.authorization;
 
-  if (!token) {
-    return next(AppError.unauthorized("Missing token"));
+  if (!authHeader?.startsWith("Bearer ")) {
+    return next(
+      AppError.unauthorized("Missing or invalid Authorization header")
+    );
   }
 
-  jwt.verify(token, SECRET_KEY, (err, user) => {
-    if (err) {
-      logger.warn({ err }, "JWT verification failed");
-      return next(AppError.unauthorized("Invalid token"));
-    }
-    req.user = user;
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as User; // ✅ Use strict type
+    req.user = decoded;
     next();
-  });
+  } catch (err) {
+    return next(AppError.unauthorized("Invalid or expired token"));
+  }
 };

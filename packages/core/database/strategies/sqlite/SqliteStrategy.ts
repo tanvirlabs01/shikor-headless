@@ -103,7 +103,8 @@ export class SqliteStrategy extends BaseDatabaseStrategy {
     let sql = `SELECT * FROM ${table} ${where}`;
 
     if (options.sort) {
-      sql += ` ORDER BY ${options.sort.field} ${options.sort.order.toUpperCase()}`;
+      const order = (options.sort.order ?? "asc").toUpperCase();
+      sql += ` ORDER BY ${options.sort.field} ${order}`;
     }
 
     if (typeof options.limit === "number") {
