@@ -47,6 +47,7 @@ export async function bootstrapCoreTables(adminUser?: AdminUserInput) {
           table.string("role").notNullable();
           table.string("refresh_token").nullable();
           table.timestamp("last_login_at").nullable(); // ✅ Add this
+          table.string("status").defaultTo("active");
           table.timestamps(true, true);
         });
         logger.info("✅ Table users created.");
@@ -135,8 +136,15 @@ async function ensureSystemSchemas(db: IDatabaseStrategy) {
       fields: [
         { name: "username", type: "string", required: true },
         { name: "password", type: "string", required: true },
-        { name: "email", type: "string", require: true },
+        { name: "email", type: "string", required: true },
         { name: "role", type: "string", required: true },
+        {
+          name: "status",
+          type: "string",
+          required: false,
+          default: "active",
+          enum: ["active", "inactive"],
+        },
       ],
     },
     {

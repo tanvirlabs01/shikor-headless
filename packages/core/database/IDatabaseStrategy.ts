@@ -12,6 +12,9 @@ export interface IDatabaseStrategy {
   read(collection: string, query: any, options?: QueryOptions): Promise<any>;
   update(collection: string, query: any, data: any): Promise<any>;
   delete(collection: string, query: any): Promise<any>;
+  createTableFromSchema(collectionName: string, fields: any[]): Promise<void>;
+  alterTableFromSchema(collectionName: string, fields: any[]): Promise<void>;
+  dropTable(collectionName: string): Promise<void>;
 
   healthCheck(): Promise<{ ok: boolean; latency: number }>;
   on(event: "connect" | "disconnect", listener: () => void): void;
