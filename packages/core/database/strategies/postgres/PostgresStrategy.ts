@@ -36,6 +36,23 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
     });
   }
 
+  private mapToPostgresType(type: string): string {
+    switch (type) {
+      case "string":
+        return "text";
+      case "number":
+        return "numeric";
+      case "integer":
+        return "integer";
+      case "boolean":
+        return "boolean";
+      case "date":
+        return "timestamp";
+      default:
+        throw new Error(`Unsupported field type: ${type}`);
+    }
+  }
+
   public registerSchema<T>(table: string, schema: ZodObject<ZodRawShape>) {
     this.schemas.set(table, schema);
   }
@@ -145,7 +162,6 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
   ): Promise<T> {
     this.validateSchema(table, data, true);
 
-    // 🚨 Defensive: Check for undefined or missing query keys
     if (!queryObj || Object.keys(queryObj).length === 0) {
       throw new Error(`Update failed: empty or missing queryObj`);
     }
@@ -180,6 +196,42 @@ export class PostgresStrategy extends BaseDatabaseStrategy {
       .returning("*");
 
     return result[0] as T;
+  }
+
+  public async createTableFromSchema(
+    tableName: string,
+    fields: { name: string; type: string; required?: boolean }[]
+  ): Promise<void> {
+    await this.db.schema.createTable(tableName, (table) => {
+      table.increments("id").primary();
+      for (const field of fields) {
+        const pgType = this.mapToPostgresType(field.type);
+        let column = table.specificType(field.name, pgType);
+        if (field.required) column.notNullable();
+      }
+    });
+  }
+
+  public async alterTableFromSchema(
+    tableName: string,
+    fields: { name: string; type: string; required?: boolean }[]
+  ): Promise<void> {
+    const existingColumns = await this.db(tableName).columnInfo();
+
+    await this.db.schema.alterTable(tableName, (table) => {
+      for (const field of fields) {
+        if (existingColumns[field.name]) {
+          continue;
+        }
+        const dbType = this.mapToPostgresType(field.type);
+        let column = table.specificType(field.name, dbType);
+        if (field.required) column.notNullable();
+      }
+    });
+  }
+
+  public async dropTable(tableName: string): Promise<void> {
+    await this.db.schema.dropTableIfExists(tableName);
   }
 
   public async healthCheck(): Promise<{ ok: boolean; latency: number }> {

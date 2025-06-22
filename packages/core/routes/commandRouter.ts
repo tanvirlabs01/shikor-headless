@@ -13,10 +13,13 @@ import { logger } from "../src/telemetry/logger";
 import { authenticateToken } from "../middleware/authMiddleware";
 import { authorizeCollectionActionMiddleware } from "../middleware/authorizeCollectionActionMiddleware";
 import { collectionPermissionRegistry } from "../commands/collection_permissions/CollectionPermissionCommandRegistry";
+import { collectionSchemaRegistry } from "../commands/collection_schemas/CollectionSchemaCommandRegistry";
+import { ApiResponse } from "../utils/ApiResponse"; // ✅ Added ApiResponse import
+
 const router = express.Router();
 
 const commandSchema = z.object({
-  operation: z.enum(["create", "update", "delete", "reset"]),
+  operation: z.enum(["create", "read", "update", "delete", "reset"]),
   collection: z.string().min(1),
   data: z.record(z.any()).optional(),
   filter: z.record(z.any()).optional(),
@@ -37,6 +40,18 @@ const commandFactory = (
     if (!factory) {
       throw AppError.validationError(
         `Unsupported operation '${operation}' for collection_permissions`
+      );
+    }
+    return factory(collection, data!);
+  }
+  if (collection === "collection_schemas") {
+    const factory =
+      collectionSchemaRegistry[
+        operation as keyof typeof collectionSchemaRegistry
+      ];
+    if (!factory) {
+      throw AppError.validationError(
+        `Unsupported operation '${operation}' for collection_schemas`
       );
     }
     return factory(collection, data!);
@@ -62,11 +77,10 @@ const handler: RequestHandler = async (req, res, next) => {
 
   if (!result.success) {
     logger.warn({ payload: req.body }, "❌ Invalid command payload");
-    return next(
-      AppError.validationError("Invalid command payload", {
-        issues: result.error.flatten(),
-      })
-    );
+    res
+      .status(422)
+      .json(ApiResponse.validationError(result.error.flatten().fieldErrors));
+    return;
   }
 
   const { operation, collection, data, filter } = result.data;
@@ -91,13 +105,28 @@ const handler: RequestHandler = async (req, res, next) => {
       { result: executionResult },
       `✅ '${operation}' on '${collection}' succeeded`
     );
-    res.status(200).json({ success: true, data: executionResult });
-  } catch (error) {
+    res.status(200).json(ApiResponse.ok(executionResult));
+  } catch (error: any) {
     logger.error(
       { error, operation, collection },
       `❌ '${operation}' on '${collection}' failed`
     );
-    next(AppError.internal("Command execution failed", error));
+
+    if (error.code === "VALIDATION_FAILED") {
+      const fieldErrors: Record<string, string[]> =
+        error.details?.fieldErrors &&
+        typeof error.details.fieldErrors === "object"
+          ? error.details.fieldErrors
+          : {};
+
+      res.status(422).json(ApiResponse.validationError(fieldErrors));
+    }
+
+    res
+      .status(500)
+      .json(
+        ApiResponse.error("Command execution failed", { code: error.code })
+      );
   }
 };
 

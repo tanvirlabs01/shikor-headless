@@ -122,4 +122,13 @@ export class MockDatabaseStrategy extends BaseDatabaseStrategy {
     // This is a no-op in mock, but you can simulate if needed
     listener();
   }
+  async createTableFromSchema() {
+    throw new Error("Not implemented yet");
+  }
+  async alterTableFromSchema() {
+    throw new Error("Not implemented yet");
+  }
+  async dropTable() {
+    throw new Error("Not implemented yet");
+  }
 }

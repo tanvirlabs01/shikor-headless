@@ -181,4 +181,13 @@ export class MongoStrategy extends BaseDatabaseStrategy {
   public getDb(): Db {
     return this.db;
   }
+  async createTableFromSchema() {
+    throw new Error("Not implemented yet");
+  }
+  async alterTableFromSchema() {
+    throw new Error("Not implemented yet");
+  }
+  async dropTable() {
+    throw new Error("Not implemented yet");
+  }
 }

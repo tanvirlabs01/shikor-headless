@@ -44,4 +44,15 @@ export abstract class BaseDatabaseStrategy implements IDatabaseStrategy {
       }
     }
   }
+  abstract createTableFromSchema(
+    tableName: string,
+    fields: { name: string; type: string; required?: boolean }[]
+  ): Promise<void>;
+
+  abstract alterTableFromSchema(
+    tableName: string,
+    fields: { name: string; type: string; required?: boolean }[]
+  ): Promise<void>;
+
+  abstract dropTable(tableName: string): Promise<void>;
 }
